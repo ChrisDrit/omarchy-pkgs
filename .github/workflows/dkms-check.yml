@@ -1,0 +1,46 @@
+name: DKMS check
+
+# Builds every DKMS module this repository publishes against every kernel's
+# headers on a channel, the way a machine does on an update (bin/check-dkms).
+# A kernel that renames or drops something an out-of-tree module uses turns
+# this red before users reboot into it: linux-omarchy 7.2.8-9 renamed
+# battery_hook_register and the TUXEDO modules stopped building on 4.0.5.
+#
+# Run it by hand against a channel, for example before promoting a kernel:
+#   gh workflow run dkms-check.yml -R omacom/omarchy-pkgs -f channel=edge
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Channel whose kernels and DKMS packages to check
+        type: choice
+        options: [edge, rc, stable]
+        default: edge
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dkms-check-${{ inputs.channel }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: DKMS on ${{ inputs.channel }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    # GitHub-hosted, with no secrets: the check only reads published packages,
+    # and it installs them as root in a throwaway container.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build every DKMS module against every ${{ inputs.channel }} kernel
+        run: bin/check-dkms container --arch "${{ matrix.arch }}" --channel "${{ inputs.channel }}"

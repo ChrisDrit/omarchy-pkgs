@@ -1,0 +1,17 @@
+# Every DKMS package this repository publishes, and the architectures
+# bin/check-dkms builds it for against every kernel's headers. check-dkms fails
+# when a channel publishes a DKMS source tree for a package that is not listed
+# here, so a new DKMS recipe cannot slip past the gate.
+#
+# package                              architectures
+brcmfmac-awdl-dkms                     aarch64
+intel-ipu7-camera                      x86_64
+macbook12-spi-driver-dkms              x86_64
+macbook8-spi-pxa2xx-nodma-dkms         x86_64
+nvidia-580xx-dkms                      x86_64
+nvidia-open-dkms                       aarch64
+omarchy-ane-dkms                       aarch64
+thinkpad-t14-amd-touchpad-dkms         x86_64
+tuxedo-drivers-nocompatcheck-dkms      x86_64
+xpadneo-dkms                           x86_64 aarch64
+yt6801-dkms                            x86_64

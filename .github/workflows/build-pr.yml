@@ -43,6 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.list.outputs.matrix }}
+      reused: ${{ steps.list.outputs.reused }}
       count: ${{ steps.gate.outputs.count }}
       trusted: ${{ steps.gate.outputs.trusted }}
       vouch_status: ${{ steps.vouch.outputs.status }}
@@ -133,8 +134,12 @@ jobs:
               { echo "Reused existing build artifacts (${#reused[@]}):"; printf -- '- %s\n' "${reused[@]}"; } >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "planned=$(jq '.include | length' <<<"$matrix")" >> "$GITHUB_OUTPUT"
+          {
+            echo "matrix=$matrix"
+            # The DKMS check needs every package that would publish, reused ones too.
+            echo "reused=$(printf '%s\n' "${reused[@]:-}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+            echo "planned=$(jq '.include | length' <<<"$matrix")"
+          } >> "$GITHUB_OUTPUT"
           jq -r '.include[] | "\(.package) \(.arch) -> \(.channels)"' <<<"$matrix"
           # A PR whose diff against its base is empty changes nothing: its
           # content already landed some other way (a sync PR beat it, or a
@@ -308,6 +313,99 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Kernels and DKMS modules from this build against the other half that edge
+  # publishes, Arch's DKMS packages included (bin/check-dkms; ci/dkms-packages):
+  # a new kernel against every module, a new module against every kernel. A
+  # kernel that renames something an out-of-tree module uses, as linux-omarchy
+  # 7.2.8-9 did to the TUXEDO modules (#1244), turns `result` red here instead
+  # of on users' machines. It sees exactly what would publish: this run's
+  # artifacts and the ones the plan reused (bin/build-artifacts). `dkms-decide`
+  # reads them on the host in seconds; only an architecture with a kernel or
+  # DKMS package among them starts a container. Base tooling, like the build:
+  # a base branch without bin/check-dkms skips the check.
+  dkms-decide:
+    name: "DKMS: what needs a check"
+    needs: [changes, build]
+    if: >-
+      always() && needs.changes.result == 'success' && needs.changes.outputs.trusted == 'true'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+      && (needs.changes.outputs.count != '0' || needs.changes.outputs.reused != '[]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # bin/build-artifacts downloads this run's artifacts
+    outputs:
+      arches: ${{ steps.decide.outputs.arches }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref || github.sha }}
+          persist-credentials: false
+      - name: Decide which architectures need a check
+        id: decide
+        env:
+          MATRIX: ${{ needs.changes.outputs.matrix }}
+          REUSED: ${{ needs.changes.outputs.reused || '[]' }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x bin/check-dkms || ! -x bin/build-artifacts ]]; then
+            echo "::notice::The base branch has no DKMS check yet; it runs once this tooling is on the base branch."
+            echo "arches=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$HEAD_SHA"
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libarchive-tools >/dev/null
+          bin/build-artifacts built "${{ github.run_id }}" "$MATRIX" "$REUSED" "$HEAD_SHA"
+          arches=()
+          for arch in x86_64 aarch64; do
+            rc=0
+            bin/check-dkms needs --arch "$arch" --local built --channel edge || rc=$?
+            case $rc in
+              0) arches+=("$arch") ;;
+              1) echo "$arch: no kernel or DKMS package in this build; nothing to check" ;;
+              *) exit "$rc" ;;
+            esac
+          done
+          echo "arches=$(jq -cn '$ARGS.positional' --args "${arches[@]}")" >> "$GITHUB_OUTPUT"
+
+  dkms:
+    name: "DKMS: build modules (${{ matrix.arch }})"
+    needs: [changes, dkms-decide]
+    if: always() && needs.dkms-decide.result == 'success' && needs.dkms-decide.outputs.arches != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.dkms-decide.outputs.arches || '[]') }}
+    # GitHub-hosted, like dkms-check.yml: the check installs packages as root
+    # in a throwaway container and needs no secrets.
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read # bin/build-artifacts downloads this run's artifacts
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref || github.sha }}
+          persist-credentials: false
+      - name: Collect what this build would publish
+        env:
+          MATRIX: ${{ needs.changes.outputs.matrix }}
+          REUSED: ${{ needs.changes.outputs.reused || '[]' }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$HEAD_SHA"
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libarchive-tools >/dev/null
+          bin/build-artifacts built "${{ github.run_id }}" "$MATRIX" "$REUSED" "$HEAD_SHA"
+      - name: Build DKMS modules against edge
+        run: bin/check-dkms container --arch "${{ matrix.arch }}" --channel edge --local built
+
   # `result` is required by branch protection. An unvouched author awaiting
   # approval gets a differently named informational check, leaving `result`
   # unreported (pending). Skipping or passing a job named `result` would count
@@ -315,12 +413,12 @@ jobs:
   # Actual planning/build failures and denouncements still report `result`.
   result:
     name: ${{ needs.changes.result == 'success' && needs.changes.outputs.trusted == 'false' && needs.changes.outputs.vouch_status == 'unknown' && needs.changes.outputs.empty == 'false' && 'Awaiting build approval' || 'result' }}
-    needs: [changes, build]
+    needs: [changes, build, dkms-decide, dkms]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "trusted=${{ needs.changes.outputs.trusted }} build=${{ needs.build.result }}"
+          echo "trusted=${{ needs.changes.outputs.trusted }} build=${{ needs.build.result }} dkms=${{ needs.dkms-decide.result }}/${{ needs.dkms.result }}"
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "::error::Build planning or the trust check failed. See the changes job."
             exit 1
@@ -341,3 +439,12 @@ jobs:
             exit 1
           fi
           [[ "${{ needs.build.result }}" == "success" || "${{ needs.build.result }}" == "skipped" ]]
+          # The DKMS check runs only when the build shipped something; skipped is
+          # fine, anything else is not.
+          for job in "dkms-decide=${{ needs.dkms-decide.result }}" "dkms=${{ needs.dkms.result }}"; do
+            case ${job#*=} in
+              success | skipped) ;;
+              *) echo "::error::The DKMS check (${job%%=*}) did not pass: a kernel or DKMS module from this build does not build. See the DKMS jobs."
+                 exit 1 ;;
+            esac
+          done

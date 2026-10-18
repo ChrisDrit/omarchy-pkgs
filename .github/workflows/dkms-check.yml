@@ -7,7 +7,8 @@ name: DKMS check
 # stopped building on 4.0.5.
 #
 # It runs on its own:
-#   - for every pull request build, on the packages it built (dkms-pr.yml);
+#   - in every pull request build that ships a kernel or DKMS package, on
+#     what it would publish (build-pr.yml's dkms jobs, which `result` needs);
 #   - before every promotion, on what moves (promote.yml calls this);
 #   - for a change to the check itself (pull_request below);
 #   - daily, for the DKMS packages Omarchy installs from Arch (ci/dkms-packages

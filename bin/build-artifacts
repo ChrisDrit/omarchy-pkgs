@@ -1,0 +1,72 @@
+#!/bin/bash
+# The packages a pull request build ships, into <dest>: the artifacts this run
+# built, and the ones its plan reused from an earlier run (build-pr.yml skips a
+# package whose exact tree already has an artifact). A matrix entry with no
+# artifact in this run built nothing because edge already holds its version,
+# so nothing new ships for it. A reused artifact that cannot be found, or any
+# download or extraction error, fails: the DKMS check must see everything that
+# would publish.
+#
+# Usage: bin/build-artifacts <dest> <run id> <matrix json> <reused json> <head sha>
+#   <matrix json> is the changes job's {"include":[{"package","arch"},...]},
+#   <reused json> its array of reused labels (<package>-<arch>-<tree hash>).
+#   Needs gh (GH_TOKEN), bsdtar and GITHUB_REPOSITORY, in a checkout that has
+#   <head sha>.
+set -euo pipefail
+
+die() { echo "build-artifacts: $*" >&2; exit 2; }
+(($# == 5)) || die "usage: bin/build-artifacts <dest> <run id> <matrix json> <reused json> <head sha>"
+dest=$1 run=$2 matrix=$3 reused=$4 head=$5
+repo=${GITHUB_REPOSITORY:?build-artifacts needs GITHUB_REPOSITORY}
+mkdir -p "$dest"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Each artifact unpacks into a fresh directory and must yield packages; every
+# file is then copied with its own error check.
+fetch() { # fetch <artifact id> <label>
+  local id=$1 label=$2 f n=0
+  gh api "repos/$repo/actions/artifacts/$id/zip" >"$work/$label.zip" || die "cannot download artifact $label"
+  mkdir -p "$work/$label" "$work/$label.out"
+  bsdtar -xf "$work/$label.zip" -C "$work/$label" || die "cannot unzip artifact $label"
+  if [[ -f $work/$label/packages.tar ]]; then
+    tar -xf "$work/$label/packages.tar" -C "$work/$label.out" || die "cannot unpack artifact $label"
+  else
+    for f in "$work/$label"/*.pkg.tar.zst; do
+      [[ -f $f ]] || continue
+      cp -- "$f" "$work/$label.out/" || die "cannot copy ${f##*/} from artifact $label"
+    done
+  fi
+  for f in "$work/$label.out"/*.pkg.tar.*; do
+    [[ -f $f && $f != *.sig ]] || continue
+    cp -- "$f" "$dest/" || die "cannot copy ${f##*/} from artifact $label"
+    n=$((n + 1))
+  done
+  ((n)) || die "artifact $label holds no package"
+  echo "$label: $n package(s)"
+}
+
+# This run's artifacts, by name.
+mine=$(gh api --paginate "repos/$repo/actions/runs/$run/artifacts" --jq '.artifacts[] | select(.expired | not) | "\(.name)\t\(.id)"') ||
+  die "cannot list run $run's artifacts"
+
+while IFS=$'\t' read -r package arch; do
+  [[ -n $package ]] || continue
+  tree=$(git rev-parse -q --verify "$head:pkgbuilds/$package") || die "no pkgbuilds/$package at $head"
+  label=$package-$arch-$tree
+  id=$(awk -F'\t' -v l="$label" '$1 == l { print $2; exit }' <<<"$mine")
+  if [[ -z $id ]]; then
+    echo "$label: nothing built (edge already holds this version)"
+    continue
+  fi
+  fetch "$id" "$label"
+done < <(jq -r '.include[] | "\(.package)\t\(.arch)"' <<<"$matrix")
+
+while IFS= read -r label; do
+  [[ -n $label ]] || continue
+  id=$(gh api "repos/$repo/actions/artifacts?name=$label&per_page=20" \
+    --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .id // empty') ||
+    die "cannot look up artifact $label"
+  [[ -n $id ]] || die "the plan reused artifact $label, which no longer exists; rerun the build"
+  fetch "$id" "$label"
+done < <(jq -r '.[]' <<<"$reused")

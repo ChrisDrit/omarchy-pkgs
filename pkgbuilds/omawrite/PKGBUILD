@@ -2,7 +2,7 @@
 
 pkgname=omawrite
 pkgver=0.7.1
-pkgrel=1
+pkgrel=2
 pkgdesc='Dead-simple Markdown writing app built with Qt Quick'
 arch=('x86_64' 'aarch64')
 url='https://github.com/omacom/omawrite'
@@ -11,7 +11,7 @@ install='omawrite.install'
 options=('!debug')
 depends=(
   'hicolor-icon-theme'
-  'qt6-base'
+  'qt6-base>=6.12'
   'qt6-declarative'
   'xdg-desktop-portal'
 )

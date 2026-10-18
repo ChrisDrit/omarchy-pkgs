@@ -1,6 +1,6 @@
 pkgname=quickshell
 pkgver=0.3.2.r7.g2b4501a
-pkgrel=1
+pkgrel=2
 pkgdesc='Flexible toolkit for making desktop shells with QtQuick'
 arch=(x86_64 aarch64)
 url='https://github.com/quickshell-mirror/quickshell'
@@ -19,8 +19,8 @@ depends=(
   mesa
   pam
   polkit
-  qt6-base
-  qt6-declarative
+  'qt6-base>=6.12'
+  'qt6-declarative>=6.12'
   qt6-svg
   qt6-wayland
   wayland

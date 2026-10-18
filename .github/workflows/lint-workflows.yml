@@ -1,0 +1,239 @@
+name: Lint workflows
+
+# Checks the CI definitions whenever a change touches them: actionlint over
+# every workflow (its shellcheck pass covers each run: block), shellcheck over
+# the scripts in .github/scripts, and a parse of every other YAML file in the
+# repository. zizmor audits the workflows for security problems and reports
+# what it finds without failing, until the findings already on master are
+# fixed.
+#
+# No paths filter on pull_request: a workflow that a filter leaves out never
+# reports, so a required check would wait on it forever. Every PR runs the one
+# job instead; it reads the PR's file list and, when no CI definition or YAML
+# file is in it, passes in a few seconds with a notice.
+on:
+  pull_request:
+  push:
+    branches: [master]
+    paths:
+      - ".github/**"
+      - "**/*.yml"
+      - "**/*.yaml"
+  workflow_dispatch:
+
+permissions: {}
+
+# One run per PR: a new push cancels the run it supersedes. Pushes to master
+# and manual runs each get a group of their own and always finish.
+concurrency:
+  group: lint-workflows-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-workflows:
+    name: lint-workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # to check out the repository
+      pull-requests: read # to list the PR's files
+    # Every tool is a release binary pinned by version and sha256, shellcheck
+    # included: the runner image's own shellcheck changes with the image, and
+    # with it what actionlint reports. To update one, change its version and
+    # take the new sha256 from the release's assets.
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      SHELLCHECK_VERSION: 0.11.0
+      SHELLCHECK_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+      ZIZMOR_VERSION: 1.31.1
+      ZIZMOR_SHA256: d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99
+    steps:
+      # The PR's own files, as GitHub lists them against the merge base (the
+      # same list build-pr.yml's changes job reads), with both names of a
+      # renamed file. Anything under .github/ counts, and any YAML file
+      # elsewhere. The list stops at 3000 files; a PR with more than it shows
+      # is linted in full. A push to master or a manual run always lints
+      # everything.
+      - name: Decide what to check
+        id: scope
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+          # One line per changed file: its name, and a tab and its old name
+          # when it was renamed.
+          if ! files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | [.filename, .previous_filename // empty] | @tsv'); then
+            echo "::warning::Could not list the PR's files; linting everything."
+            echo "lint=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          listed=$(grep -c . <<<"$files" || true)
+          relevant=$(tr '\t' '\n' <<<"$files" | grep -E '^\.github/|\.ya?ml$' || true)
+          if (( listed < CHANGED_FILES )); then
+            echo "GitHub listed $listed of $CHANGED_FILES changed files; linting everything."
+            echo "lint=true" >> "$GITHUB_OUTPUT"
+          elif [[ -n $relevant ]]; then
+            printf 'Changed CI definitions and YAML files:\n%s\n' "$relevant"
+            echo "lint=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No file under .github/ and no YAML file changed; nothing to lint."
+            echo "lint=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the repository
+        if: steps.scope.outputs.lint != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint, shellcheck and zizmor
+        id: tools
+        if: steps.scope.outputs.lint != 'false'
+        run: |
+          set -euo pipefail
+          bin=$RUNNER_TEMP/lint-tools
+          mkdir -p "$bin"
+          fetch() {
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/$3" "$1"
+            echo "$2  $RUNNER_TEMP/$3" | sha256sum --check --strict
+          }
+          fetch "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            "$ACTIONLINT_SHA256" actionlint.tar.gz
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$bin" actionlint
+          fetch "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/shellcheck-v$SHELLCHECK_VERSION.linux.x86_64.tar.gz" \
+            "$SHELLCHECK_SHA256" shellcheck.tar.gz
+          tar -xzf "$RUNNER_TEMP/shellcheck.tar.gz" -C "$bin" --strip-components=1 "shellcheck-v$SHELLCHECK_VERSION/shellcheck"
+          fetch "https://github.com/zizmorcore/zizmor/releases/download/v$ZIZMOR_VERSION/zizmor-x86_64-unknown-linux-gnu.tar.gz" \
+            "$ZIZMOR_SHA256" zizmor.tar.gz
+          tar -xzf "$RUNNER_TEMP/zizmor.tar.gz" -C "$bin" zizmor
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/actionlint" -version
+          "$bin/shellcheck" --version
+          "$bin/zizmor" --version
+
+      # actionlint reads .github/actionlint.yaml (the self-hosted runner
+      # labels, and the one message it gets wrong) and runs the pinned
+      # shellcheck over every run: block. Each finding is an error annotation
+      # on the line it is about; a shellcheck finding is on its step's run:
+      # line, and its message gives the line in the script (SC2086:info:16:24
+      # is line 16, column 24). This and the checks after it all run once the
+      # tools are installed, even when one before them failed, so a single
+      # run reports every problem.
+      - name: Run actionlint
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          command -v shellcheck
+          # shellcheck disable=SC2016 # a Go template for actionlint, not shell
+          actionlint -format '{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}},col={{$err.Column}},title=actionlint {{$err.Kind}}::{{$err.Filepath}}:{{$err.Line}}:{{$err.Column}}: {{$err.Message}}\n{{end}}'
+
+      # The scripts the workflows call. The .cjs scripts have their own tests
+      # in test.yml.
+      - name: Run shellcheck on .github/scripts
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(git ls-files '.github/scripts/*.sh')
+          if (( ${#scripts[@]} )); then
+            shellcheck "${scripts[@]}"
+          fi
+
+      # actionlint covers the workflows; every other YAML file must at least
+      # load. That is the runner and controller cloud-init templates, package
+      # data and upstream CI files under pkgbuilds/, and this repository's
+      # own .github configuration. A key given twice is an error too: PyYAML,
+      # like cloud-init, would otherwise keep the last one without a word.
+      # cloud-init applies user data only when its first line is
+      # #cloud-config, so the templates are held to that.
+      - name: Check that the other YAML files load
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          git ls-files -z '*.yml' '*.yaml' ':!:.github/workflows/' | python3 -c '
+          import sys, yaml
+
+          class Loader(yaml.SafeLoader):
+              pass
+
+          # A mapping written inline under a merge key (<<) is merged without
+          # being constructed on its own, so its keys are checked here too. A
+          # key that overrides a merged one is not a duplicate.
+          def unique(loader, node):
+              seen = set()
+              for key_node, value_node in node.value:
+                  if key_node.tag == "tag:yaml.org,2002:merge":
+                      sources = value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
+                      for source in sources:
+                          if isinstance(source, yaml.MappingNode):
+                              unique(loader, source)
+                      continue
+                  key = loader.construct_object(key_node, deep=True)
+                  if key in seen:
+                      raise yaml.constructor.ConstructorError(
+                          None, None, f"duplicate key {key!r}", key_node.start_mark)
+                  seen.add(key)
+
+          def mapping(loader, node, deep=False):
+              unique(loader, node)
+              return loader.construct_mapping(node, deep)
+
+          Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+
+          failed = 0
+          for path in filter(None, sys.stdin.read().split("\0")):
+              try:
+                  with open(path, encoding="utf-8") as f:
+                      list(yaml.load_all(f, Loader=Loader))
+                      f.seek(0)
+                      if "cloud-init" in path and f.readline() != "#cloud-config\n":
+                          raise ValueError("cloud-init user data must start with a #cloud-config line")
+                  print(f"ok    {path}")
+              except (yaml.YAMLError, ValueError) as e:
+                  failed = 1
+                  mark = getattr(e, "problem_mark", None)
+                  line = f",line={mark.line + 1}" if mark else ""
+                  message = " ".join(str(e).split())
+                  print(f"::error file={path}{line},title=YAML::{message}")
+          sys.exit(failed)
+          '
+
+      # Informational until the findings already on master are fixed, and
+      # then it should fail the job like the checks above. The full report
+      # goes to the log, a count by audit and severity to the job summary.
+      # The token lets zizmor's online audits look up the actions the
+      # workflows use.
+      - name: Run zizmor (informational)
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          status=0
+          zizmor --format=json-v1 . > "$RUNNER_TEMP/zizmor.json" 2> "$RUNNER_TEMP/zizmor.err" || status=$?
+          zizmor --format=plain . 2>/dev/null || true
+          if (( status != 0 && status < 11 )); then
+            cat "$RUNNER_TEMP/zizmor.err"
+            echo "::warning::zizmor did not complete (exit $status); see the log."
+            echo "zizmor did not complete (exit $status)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - "$RUNNER_TEMP/zizmor.json" >> "$GITHUB_STEP_SUMMARY" <<'PY' || echo "::warning::Could not summarise zizmor's findings."
+          import collections, json, sys
+          findings = json.load(open(sys.argv[1]))
+          order = {"High": 0, "Medium": 1, "Low": 2, "Informational": 3, "Unknown": 4}
+          counts = collections.Counter(
+              (f["determinations"]["severity"], f["ident"]) for f in findings)
+          print(f"### zizmor: {len(findings)} findings (informational, not failing)\n")
+          if findings:
+              print("| Audit | Severity | Findings |")
+              print("|---|---|---:|")
+              for (severity, ident), n in sorted(
+                      counts.items(), key=lambda kv: (order.get(kv[0][0], 9), -kv[1], kv[0][1])):
+                  print(f"| [`{ident}`](https://docs.zizmor.sh/audits/#{ident}) | {severity} | {n} |")
+          PY
+          exit 0

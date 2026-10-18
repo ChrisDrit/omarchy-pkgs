@@ -319,11 +319,11 @@ jobs:
   # kernel that renames something an out-of-tree module uses, as linux-omarchy
   # 7.2.8-9 did to the TUXEDO modules (#1244), turns `result` red here instead
   # of on users' machines. It sees exactly what would publish: this run's
-  # artifacts and the ones the plan reused (bin/build-artifacts). `dkms-decide`
+  # artifacts and the ones the plan reused (bin/build-artifacts). `dkms_decide`
   # reads them on the host in seconds; only an architecture with a kernel or
   # DKMS package among them starts a container. Base tooling, like the build:
   # a base branch without bin/check-dkms skips the check.
-  dkms-decide:
+  dkms_decide:
     name: "DKMS: what needs a check"
     needs: [changes, build]
     if: >-
@@ -373,12 +373,12 @@ jobs:
 
   dkms:
     name: "DKMS: build modules (${{ matrix.arch }})"
-    needs: [changes, dkms-decide]
-    if: always() && needs.dkms-decide.result == 'success' && needs.dkms-decide.outputs.arches != '[]'
+    needs: [changes, dkms_decide]
+    if: always() && needs.dkms_decide.result == 'success' && needs.dkms_decide.outputs.arches != '[]'
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(needs.dkms-decide.outputs.arches || '[]') }}
+        arch: ${{ fromJSON(needs.dkms_decide.outputs.arches || '[]') }}
     # GitHub-hosted, like dkms-check.yml: the check installs packages as root
     # in a throwaway container and needs no secrets.
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
@@ -413,12 +413,12 @@ jobs:
   # Actual planning/build failures and denouncements still report `result`.
   result:
     name: ${{ needs.changes.result == 'success' && needs.changes.outputs.trusted == 'false' && needs.changes.outputs.vouch_status == 'unknown' && needs.changes.outputs.empty == 'false' && 'Awaiting build approval' || 'result' }}
-    needs: [changes, build, dkms-decide, dkms]
+    needs: [changes, build, dkms_decide, dkms]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "trusted=${{ needs.changes.outputs.trusted }} build=${{ needs.build.result }} dkms=${{ needs.dkms-decide.result }}/${{ needs.dkms.result }}"
+          echo "trusted=${{ needs.changes.outputs.trusted }} build=${{ needs.build.result }} dkms=${{ needs.dkms_decide.result }}/${{ needs.dkms.result }}"
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "::error::Build planning or the trust check failed. See the changes job."
             exit 1
@@ -441,7 +441,7 @@ jobs:
           [[ "${{ needs.build.result }}" == "success" || "${{ needs.build.result }}" == "skipped" ]]
           # The DKMS check runs only when the build shipped something; skipped is
           # fine, anything else is not.
-          for job in "dkms-decide=${{ needs.dkms-decide.result }}" "dkms=${{ needs.dkms.result }}"; do
+          for job in "dkms_decide=${{ needs.dkms_decide.result }}" "dkms=${{ needs.dkms.result }}"; do
             case ${job#*=} in
               success | skipped) ;;
               *) echo "::error::The DKMS check (${job%%=*}) did not pass: a kernel or DKMS module from this build does not build. See the DKMS jobs."

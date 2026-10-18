@@ -17,17 +17,23 @@ on:
         type: choice
         options: [edge, rc, stable]
         default: edge
+  # A change to the check itself runs it, against edge.
+  pull_request:
+    paths:
+      - bin/check-dkms
+      - ci/dkms-packages
+      - .github/workflows/dkms-check.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: dkms-check-${{ inputs.channel }}
+  group: dkms-check-${{ inputs.channel || 'edge' }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
-    name: DKMS on ${{ inputs.channel }} (${{ matrix.arch }})
+    name: DKMS on ${{ inputs.channel || 'edge' }} (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -42,5 +48,5 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
-      - name: Build every DKMS module against every ${{ inputs.channel }} kernel
-        run: bin/check-dkms container --arch "${{ matrix.arch }}" --channel "${{ inputs.channel }}"
+      - name: Build every DKMS module against every ${{ inputs.channel || 'edge' }} kernel
+        run: bin/check-dkms container --arch "${{ matrix.arch }}" --channel "${{ inputs.channel || 'edge' }}"

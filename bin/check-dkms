@@ -31,6 +31,8 @@
 #   bin/check-dkms needs --arch <arch> --local <dir> [--channel <channel> | --files-db <omarchy.files>]
 #       Exit 0 when <dir> holds a kernel or DKMS package for <arch>, or a
 #       package the channel publishes as one (so losing that role is caught).
+#   bin/check-dkms roles --arch <arch> --files-db <omarchy.files>
+#       Print "<kind> <name> <pkgbase>" for every package of the database.
 #   bin/check-dkms fingerprint --arch <arch> --channel <channel>
 #       Print the versions a --from-repos run depends on (curl and tar only).
 set -euo pipefail
@@ -42,7 +44,7 @@ X86_64_IMAGE=${OMARCHY_DKMS_X86_64_IMAGE:-ghcr.io/archlinux/archlinux:base-devel
 AARCH64_IMAGE=${OMARCHY_DKMS_AARCH64_IMAGE:-ghcr.io/menci/archlinuxarm@sha256:3e1074c407fc1a57c2a2117af6920c96a7cc906fa6f1f2da8a4a7fd3aa2c2f4e}
 
 die() { echo "check-dkms: $*" >&2; exit 2; }
-usage() { sed -n '20,35p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '20,37p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 mode=${1:-}
 [[ -n $mode ]] || usage
@@ -399,6 +401,12 @@ case $mode in
       fi
     done
     exit "$found"
+    ;;
+
+  roles)
+    # What bin/pr-packages expects a pull request to have built.
+    [[ -f $files_db ]] || die "roles needs --files-db"
+    read_db "$files_db" | awk -F'\t' '{ print $1 "\t" $2 "\t" $7 }'
     ;;
 
   fingerprint)

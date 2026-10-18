@@ -2,19 +2,26 @@
 # Collect every package a pull request's head commit builds into <dest>,
 # wherever it was built. build-pr.yml reuses the artifact of a package whose
 # exact tree already built once (label <package>-<arch>-<tree hash>), so the
-# build run a check reports on may hold none of the pull request's packages.
-# Looking each one up by its label finds the same bytes publish.yml ships on
-# merge. A package with no live artifact at its tree did not build, so it
-# cannot publish either; it is named and skipped.
+# build run a check reports on may hold none of the pull request's packages;
+# looking each one up by its label finds them.
+#
+# A missing artifact must not read as "nothing to check" (publish.yml rebuilds
+# what it cannot find), so each recipe the pull request touches must have one:
+#   - for every architecture where the channel publishes it as a kernel or
+#     DKMS package (matched by pkgbase or name, bin/check-dkms roles);
+#   - for at least one architecture when the channel does not publish it.
+# Other recipes are not this check's business. Exit 3 names what is missing:
+# a build that was only planned (an author not yet vouched for) or an artifact
+# that expired; the check waits for the next build instead of passing.
 #
 # Usage: bin/pr-packages <pull request> <sha> <dest>
 #   Needs GH_TOKEN and GITHUB_REPOSITORY, and runs in a checkout of this
-#   repository (it fetches <sha> to read package trees; nothing from the pull
-#   request is executed).
+#   repository. It fetches <sha> to read package trees and reads the edge
+#   channel's databases; nothing from the pull request is executed.
 set -euo pipefail
 ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
-# shellcheck source=helpers/artifact-helpers.sh
-source "$ROOT/helpers/artifact-helpers.sh"
+PKGS_BASE=${OMARCHY_PKGS_BASE:-https://pkgs.omarchy.org}
+CHANNEL=${OMARCHY_PR_CHANNEL:-edge}
 
 die() { echo "pr-packages: $*" >&2; exit 2; }
 (($# == 3)) || die "usage: bin/pr-packages <pull request> <sha> <dest>"
@@ -22,17 +29,40 @@ pr=$1 sha=$2 dest=$3
 repo=${GITHUB_REPOSITORY:?pr-packages needs GITHUB_REPOSITORY}
 mkdir -p "$dest"
 
-git -C "$ROOT" fetch -q --no-tags --depth=1 origin "$sha" || die "cannot fetch $sha"
-names=$(gh api --paginate "repos/$repo/pulls/$pr/files" --jq '.[].filename' |
-  awk -F/ '$1 == "pkgbuilds" && NF > 2 { print $2 }' | sort -u) || die "cannot list pull request $pr's files"
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+
+git -C "$ROOT" fetch -q --no-tags --depth=1 origin "$sha" || die "cannot fetch $sha"
+names=$(gh api --paginate "repos/$repo/pulls/$pr/files" --jq '.[].filename') || die "cannot list pull request $pr's files"
+names=$(awk -F/ '$1 == "pkgbuilds" && NF > 2 { print $2 }' <<<"$names" | sort -u)
+
+# "<arch> <kind> <name> <pkgbase>" for everything the channel publishes.
+published=""
+for arch in x86_64 aarch64; do
+  curl -fsSL --retry 3 -o "$work/$arch.files" "$PKGS_BASE/$CHANNEL/$arch/omarchy.files" || die "cannot download $CHANNEL/$arch/omarchy.files"
+  roles=$("$ROOT/bin/check-dkms" roles --arch "$arch" --files-db "$work/$arch.files") || die "cannot read $CHANNEL/$arch/omarchy.files"
+  published+=$(awk -v a="$arch" '{ print a "\t" $0 }' <<<"$roles")$'\n'
+done
+
+# extract <artifact dir>: its packages into <dest>, failing on any error.
+extract() {
+  local dir=$1 before after
+  before=$(find "$dest" -maxdepth 1 -name '*.pkg.tar.*' ! -name '*.sig' | wc -l)
+  if [[ -f $dir/packages.tar ]]; then
+    tar -xf "$dir/packages.tar" -C "$dest" || return 1
+  else
+    find "$dir" -maxdepth 1 -name '*.pkg.tar.zst' -exec cp -- {} "$dest/" \; || return 1
+  fi
+  after=$(find "$dest" -maxdepth 1 -name '*.pkg.tar.*' ! -name '*.sig' | wc -l)
+  ((after > before))
+}
+
+missing=()
 while IFS= read -r name; do
   [[ -n $name ]] || continue
-  # A package the pull request deletes has nothing to build.
+  # A recipe the pull request deletes has nothing to build.
   tree=$(git -C "$ROOT" rev-parse -q --verify "$sha:pkgbuilds/$name" 2>/dev/null) || continue
-  found=0
+  built=()
   for arch in x86_64 aarch64; do
     label=$name-$arch-$tree
     id=$(gh api "repos/$repo/actions/artifacts?name=$label&per_page=20" \
@@ -42,9 +72,21 @@ while IFS= read -r name; do
     gh api "repos/$repo/actions/artifacts/$id/zip" >"$work/$label.zip" || die "cannot download artifact $label"
     mkdir -p "$work/$label"
     unzip -q -o "$work/$label.zip" -d "$work/$label" || die "cannot unpack artifact $label"
-    unpack_packages "$work/$label" "$dest" || die "artifact $label holds no packages"
+    extract "$work/$label" || die "artifact $label holds no package that could be extracted"
     echo "$label"
-    found=1
+    built+=("$arch")
   done
-  ((found)) || echo "pr-packages: note: no live build artifact for $name at $tree; it did not build, so it does not publish" >&2
+  mine=$(awk -F'\t' -v n="$name" '$4 == n || $3 == n' <<<"$published")
+  if [[ -z $mine ]]; then
+    ((${#built[@]})) || missing+=("$name")
+    continue
+  fi
+  for arch in $(awk -F'\t' '$2 == "kernel" || $2 == "dkms" { print $1 }' <<<"$mine" | sort -u); do
+    [[ " ${built[*]} " == *" $arch "* ]] || missing+=("$name ($arch)")
+  done
 done <<<"$names"
+
+if ((${#missing[@]})); then
+  printf 'pr-packages: no live build artifact for: %s\n' "${missing[*]}" >&2
+  exit 3
+fi

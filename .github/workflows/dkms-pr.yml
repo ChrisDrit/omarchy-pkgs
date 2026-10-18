@@ -16,7 +16,13 @@ name: DKMS check on built packages
 # The packages are the pull request head's, looked up by artifact label
 # (bin/pr-packages), not only the triggering run's: build-pr.yml reuses the
 # artifact of a package whose tree already built, and that package must still
-# be checked.
+# be checked. A kernel or DKMS recipe without a live artifact (a build only
+# planned for an author not yet vouched for, an expired artifact) leaves both
+# statuses pending until a build provides it; it never reads as a pass.
+#
+# Only successful pull request builds run the check. A failed or cancelled
+# build posts nothing (its required `result` is red anyway), and neither it nor
+# a dispatched build can cancel a check that is running.
 #
 # workflow_run runs master's copy of this file and of the scripts it calls; the
 # pull request contributes only the built packages, which build-pr.yml made
@@ -34,15 +40,19 @@ permissions:
   pull-requests: read
   statuses: write
 
-# One run per pull request branch: a newer build cancels the older run before
-# the newer one posts anything, so an older result can never overwrite it.
+# One run per pull request branch: a newer successful build cancels the older
+# run before the newer one posts anything, so an older result never overwrites
+# it. Every other completion gets a group of its own and cancels nothing.
 concurrency:
-  group: dkms-pr-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  group: >-
+    ${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    && format('dkms-pr-{0}-{1}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch)
+    || format('dkms-pr-other-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
   decide:
-    if: github.event.workflow_run.event == 'pull_request'
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
     name: Decide what needs a DKMS check
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -52,7 +62,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       SHA: ${{ github.event.workflow_run.head_sha }}
-      BUILD: ${{ github.event.workflow_run.conclusion }}
       TARGET: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +77,7 @@ jobs:
         run: |
           number=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
           if [[ -z $number ]]; then
-            number=$(gh api "repos/${{ github.repository }}/pulls?state=all&head=$HEAD" \
+            number=$(gh api -X GET "repos/${{ github.repository }}/pulls" -f state=all -f head="$HEAD" \
               --jq '[.[] | select(.head.sha == env.SHA)][0].number // empty')
           fi
           echo "number=$number" >> "$GITHUB_OUTPUT"
@@ -89,24 +98,31 @@ jobs:
             exit 1
           }
           arches=()
-          if [[ $BUILD != success ]]; then
-            status x86_64 success "The package build did not succeed; nothing to check"
-            status aarch64 success "The package build did not succeed; nothing to check"
-          else
-            [[ -n $PR ]] || fail_both "Could not find the pull request for this commit; see the run"
-            sudo apt-get install -y --no-install-recommends libarchive-tools >/dev/null
-            bin/pr-packages "$PR" "$SHA" built || fail_both "Could not collect the built packages; see the run"
-            for arch in x86_64 aarch64; do
-              rc=0
-              bin/check-dkms needs --arch "$arch" --local built --channel edge || rc=$?
-              case $rc in
-                0) arches+=("$arch")
-                   status "$arch" pending "Building DKMS modules against this build" ;;
-                1) status "$arch" success "No $arch kernel or DKMS package in this build; nothing to check" ;;
-                *) fail_both "Could not read the built packages; see the run" ;;
-              esac
-            done
-          fi
+          [[ -n $PR ]] || fail_both "Could not find the pull request for this commit; see the run"
+          sudo apt-get install -y --no-install-recommends libarchive-tools >/dev/null
+          rc=0
+          bin/pr-packages "$PR" "$SHA" built 2>missing.txt || rc=$?
+          cat missing.txt >&2
+          case $rc in
+            0) ;;
+            3) # Not built yet, or the artifact expired: wait for a build.
+               waiting=$(sed -n 's/^pr-packages: no live build artifact for: //p' missing.txt | cut -c1-100)
+               status x86_64 pending "Waiting for a build of: $waiting"
+               status aarch64 pending "Waiting for a build of: $waiting"
+               echo "arches=[]" >> "$GITHUB_OUTPUT"
+               exit 0 ;;
+            *) fail_both "Could not collect the built packages; see the run" ;;
+          esac
+          for arch in x86_64 aarch64; do
+            rc=0
+            bin/check-dkms needs --arch "$arch" --local built --channel edge || rc=$?
+            case $rc in
+              0) arches+=("$arch")
+                 status "$arch" pending "Building DKMS modules against this build" ;;
+              1) status "$arch" success "No $arch kernel or DKMS package in this build; nothing to check" ;;
+              *) fail_both "Could not read the built packages; see the run" ;;
+            esac
+          done
           echo "arches=$(jq -cn '$ARGS.positional' --args "${arches[@]}")" >> "$GITHUB_OUTPUT"
 
   check:

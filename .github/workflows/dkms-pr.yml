@@ -1,0 +1,100 @@
+name: DKMS check on built packages
+
+# After a pull request's packages build, checks the kernels and DKMS modules
+# among them against edge's published other half: a new kernel against every
+# DKMS module, a new DKMS module against every kernel (bin/check-dkms --local).
+# The result is a commit status on the pull request, "DKMS check (<arch>)";
+# a build with no kernel or DKMS package in it reports "nothing to check".
+#
+# workflow_run runs master's copy of this file and of bin/check-dkms; the pull
+# request contributes only the built packages, which build-pr.yml made after
+# its own author checks. The status token never enters the build container.
+
+on:
+  workflow_run:
+    workflows: ["Build changed packages"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  statuses: write
+
+jobs:
+  check:
+    if: github.event.workflow_run.event == 'pull_request'
+    name: DKMS on built packages (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    concurrency:
+      group: dkms-pr-${{ github.event.workflow_run.head_branch }}-${{ matrix.arch }}
+      cancel-in-progress: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      CONTEXT: DKMS check (${{ matrix.arch }})
+      TARGET: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Say the check is running
+        run: |
+          gh api "repos/${{ github.repository }}/statuses/$SHA" -f state=pending -f context="$CONTEXT" \
+            -f description="Building DKMS modules against this build" -f target_url="$TARGET" >/dev/null
+
+      - name: Collect the packages the build made
+        if: github.event.workflow_run.conclusion == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+
+      - name: Unpack them
+        id: unpack
+        if: github.event.workflow_run.conclusion == 'success'
+        run: |
+          source helpers/artifact-helpers.sh
+          mkdir -p built
+          shopt -s nullglob
+          for dir in artifacts/*/; do
+            [[ -f $dir/packages.tar ]] && unpack_packages "$dir" built
+          done
+          files=(built/*-"${{ matrix.arch }}".pkg.tar.zst built/*-any.pkg.tar.zst)
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${files[@]##*/}"
+
+      - name: Build DKMS modules against this build
+        id: check
+        if: github.event.workflow_run.conclusion == 'success' && steps.unpack.outputs.count != '0'
+        run: bin/check-dkms container --arch "${{ matrix.arch }}" --channel edge --local built
+
+      - name: Report the result
+        if: always()
+        env:
+          BUILD: ${{ github.event.workflow_run.conclusion }}
+          COUNT: ${{ steps.unpack.outputs.count }}
+          CHECK: ${{ steps.check.outcome }}
+        run: |
+          if [[ $BUILD != success ]]; then
+            state=success description="The package build did not succeed; nothing to check"
+          elif [[ ${COUNT:-0} == 0 ]]; then
+            state=success description="No ${{ matrix.arch }} package in this build; nothing to check"
+          elif [[ $CHECK == success ]]; then
+            state=success description="Every changed kernel and DKMS module builds"
+          else
+            state=failure description="A DKMS module does not build; see the run"
+          fi
+          gh api "repos/${{ github.repository }}/statuses/$SHA" -f state="$state" -f context="$CONTEXT" \
+            -f description="$description" -f target_url="$TARGET" >/dev/null
+          [[ $state == success ]]

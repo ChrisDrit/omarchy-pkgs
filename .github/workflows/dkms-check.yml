@@ -1,13 +1,18 @@
 name: DKMS check
 
-# Builds every DKMS module this repository publishes against every kernel's
-# headers on a channel, the way a machine does on an update (bin/check-dkms).
-# A kernel that renames or drops something an out-of-tree module uses turns
-# this red before users reboot into it: linux-omarchy 7.2.8-9 renamed
-# battery_hook_register and the TUXEDO modules stopped building on 4.0.5.
+# Builds DKMS modules against kernel headers on a channel, the way a machine
+# does on an update (bin/check-dkms). A kernel that renames or drops something
+# an out-of-tree module uses turns this red before users reboot into it:
+# linux-omarchy 7.2.8-9 renamed battery_hook_register and the TUXEDO modules
+# stopped building on 4.0.5.
 #
-# Run it by hand against a channel, for example before promoting a kernel:
-#   gh workflow run dkms-check.yml -R omacom/omarchy-pkgs -f channel=edge
+# It runs on its own:
+#   - for every pull request build, on the packages it built (dkms-pr.yml);
+#   - before every promotion, on what moves (promote.yml calls this);
+#   - for a change to the check itself (pull_request below).
+# By hand, for a whole channel or what differs from another one:
+#   gh workflow run dkms-check.yml -R omacom/omarchy-pkgs -f channel=stable
+#   gh workflow run dkms-check.yml -R omacom/omarchy-pkgs -f channel=edge -f since=rc
 
 on:
   workflow_dispatch:
@@ -17,7 +22,22 @@ on:
         type: choice
         options: [edge, rc, stable]
         default: edge
-  # A change to the check itself runs it, against edge.
+      since:
+        description: "Only what differs from this channel (empty: everything)"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: true
+      since:
+        type: string
+        default: ""
+      packages:
+        description: Only these packages or pkgbases (space-separated); empty means all
+        type: string
+        default: ""
   pull_request:
     paths:
       - bin/check-dkms
@@ -27,13 +47,9 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: dkms-check-${{ inputs.channel || 'edge' }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   check:
-    name: DKMS on ${{ inputs.channel || 'edge' }} (${{ matrix.arch }})
+    name: DKMS on ${{ inputs.channel || 'edge' }}${{ inputs.since && format(' since {0}', inputs.since) || '' }} (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -46,7 +62,20 @@ jobs:
     # and it installs them as root in a throwaway container.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
+    concurrency:
+      group: dkms-check-${{ github.event_name }}-${{ github.ref }}-${{ inputs.channel || 'edge' }}-${{ matrix.arch }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Build every DKMS module against every ${{ inputs.channel || 'edge' }} kernel
-        run: bin/check-dkms container --arch "${{ matrix.arch }}" --channel "${{ inputs.channel || 'edge' }}"
+        with:
+          persist-credentials: false
+      - name: Build DKMS modules against ${{ inputs.channel || 'edge' }} kernels
+        env:
+          CHANNEL: ${{ inputs.channel || 'edge' }}
+          SINCE: ${{ inputs.since }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          args=(--arch "${{ matrix.arch }}" --channel "$CHANNEL")
+          [[ -z $SINCE ]] || args+=(--since "$SINCE")
+          [[ -z $PACKAGES ]] || args+=(--packages "$PACKAGES")
+          bin/check-dkms container "${args[@]}"

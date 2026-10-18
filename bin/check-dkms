@@ -105,7 +105,8 @@ if [[ -n $local_dir ]]; then
 fi
 
 # The DKMS packages ci/dkms-packages lists for this architecture, and the
-# kernels each is limited to ("<package> <headers>,..."; none means every one).
+# kernels each is limited to ("<package> <headers>,..."; none means every one,
+# and "!<headers>" every one but those).
 LISTED=$(awk -v a="$arch" '!/^[[:space:]]*(#|$)/ { for (i = 2; i <= NF; i++) if ($i == a) print $1 }' "$REGISTRY")
 SCOPES=$(awk -v a="$arch" '!/^[[:space:]]*(#|$)/ {
     ok = 0; k = ""
@@ -318,7 +319,22 @@ pairs() {
   local packages=$1 changed=$2
   awk -F'\t' '
     FNR == 1 { file++ }
-    file == 1 { if ($1 != "") scope[$1] = "," $2 ","; next }
+    # kernels= names the headers a module builds against, or with a leading
+    # "!" the ones it never does; with only exclusions, every other kernel.
+    function builds_against(module, kernel,   n, s, x, listed, hit) {
+      if (!(module in scope)) return 1
+      n = split(scope[module], s, ",")
+      for (x = 1; x <= n; x++) {
+        if (substr(s[x], 1, 1) == "!") {
+          if (substr(s[x], 2) == kernel) return 0
+        } else {
+          listed = 1
+          if (s[x] == kernel) hit = 1
+        }
+      }
+      return !listed || hit
+    }
+    file == 1 { if ($1 != "") scope[$1] = $2; next }
     file == 2 { if ($1 != "") c[$1] = 1; next }
     $1 == "kernel" { kn[++k] = $2; kv[k] = $6; next }
     $1 == "dkms" { dn[++d] = $2; dt[d] = $6 }
@@ -326,7 +342,7 @@ pairs() {
       for (i = 1; i <= d; i++) {
         n = split(dt[i], t, ",")
         for (j = 1; j <= k; j++)
-          if (((dn[i] in c) || (kn[j] in c)) && (!(dn[i] in scope) || index(scope[dn[i]], "," kn[j] ",")))
+          if (((dn[i] in c) || (kn[j] in c)) && builds_against(dn[i], kn[j]))
             for (x = 1; x <= n; x++) print kn[j] "\t" kv[j] "\t" dn[i] "\t" t[x]
       }
     }' <(printf '%s\n' "$SCOPES") <(printf '%s\n' "$changed") <(printf '%s\n' "$packages")

@@ -120,6 +120,29 @@ grep -qP '^pair\tlinux-aurora-headers 7.1.12-2-ARCH\tomarchy-ane-dkms ' <<<"$pla
   ! grep -qP '^pair\tlinux-omarchy-headers \S+\tomarchy-ane-dkms ' <<<"$plan" &&
   [[ $(grep -c $'^pair\t.*xpadneo-dkms' <<<"$plan") == 2 ]] &&
   pass "a module limited to some kernels is only built against those" || fail "scope: $plan"
+
+# kernels=!<headers> builds a module against every kernel but those.
+entry scoped linux-n1x-headers 7.0.14-3 usr/lib/modules/7.0.14-3-n1x/build/Makefile
+entry scoped nvidia-open-dkms 615.78.08-3 usr/src/nvidia-615.78.08/dkms.conf
+entry scoped v4l2loopback-dkms 0.15.4-2 usr/src/v4l2loopback-0.15.4/dkms.conf
+channel scoped
+nvidia_kernels() { awk -F'\t' '$1 == "pair" && $3 ~ /^nvidia-open-dkms / { split($2, k, " "); print k[1] }' | sort | tr '\n' ' '; }
+printf '%s\n' 'omarchy-ane-dkms aarch64 kernels=linux-aurora-headers' 'xpadneo-dkms x86_64 aarch64' \
+  'nvidia-open-dkms aarch64 kernels=!linux-aurora-headers' 'v4l2loopback-dkms aarch64' >"$tmp/registry"
+plan=$("$ROOT/bin/check-dkms" plan --arch aarch64 --files-db "$tmp/scoped.files" 2>"$tmp/stderr") || fail "exclude plan: $(cat "$tmp/stderr")"
+nvidia=$(nvidia_kernels <<<"$plan")
+[[ $nvidia == "linux-n1x-headers linux-omarchy-headers " ]] && [[ $(grep -c $'^pair\t.*xpadneo-dkms' <<<"$plan") == 3 ]] &&
+  pass "a module that excludes a kernel builds against every other one" || fail "exclude: $nvidia / $plan"
+# The registry itself: no Mac has an NVIDIA GPU. Its repo= packages come from
+# a fixture extra repository.
+mkdir -p "$tmp/extra-arm/v4l2loopback-dkms-0.15.4-2"
+cp "$tmp/scoped/v4l2loopback-dkms-0.15.4-2"/* "$tmp/extra-arm/v4l2loopback-dkms-0.15.4-2/"
+bsdtar -czf "$tmp/extra-arm.files" -C "$tmp/extra-arm" .
+plan=$(OMARCHY_DKMS_REGISTRY="$ROOT/ci/dkms-packages" "$ROOT/bin/check-dkms" plan --arch aarch64 --files-db "$tmp/scoped.files" \
+  --repo-files-db "extra=$tmp/extra-arm.files" 2>"$tmp/stderr") || fail "registry plan: $(cat "$tmp/stderr")"
+nvidia=$(nvidia_kernels <<<"$plan")
+[[ $nvidia == "linux-n1x-headers linux-omarchy-headers " ]] &&
+  pass "ci/dkms-packages builds aarch64 nvidia-open-dkms against every kernel but linux-aurora" || fail "registry nvidia: $nvidia"
 printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' >"$tmp/registry"
 
 # repo= packages come from an Arch repository's files database. They pair

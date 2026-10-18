@@ -537,10 +537,14 @@ case $mode in
       echo "==> Installing $name ($kver)"
       pacman -U --noconfirm --needed "$FETCHED" >/dev/null || die "cannot install $name"
     done
+    # DKMS packages are unpacked, not installed: pacman would run DKMS's own
+    # hook and build them against every kernel. The whole package, not just
+    # /usr/src: broadcom-wl's build links a blob from /usr/lib/broadcom-wl-dkms.
     for name in $(cut -f3 <<<"$PAIRS" | sort -u); do
       IFS=$'\t' read -r _ _ _ file sha _ <<<"$(line_of "$name")"
       fetch "$file" "$sha"
-      bsdtar -xpf "$FETCHED" -C / 'usr/src/*' || die "cannot unpack $name"
+      bsdtar -xpf "$FETCHED" -C / --exclude .PKGINFO --exclude .BUILDINFO --exclude .MTREE \
+        --exclude .INSTALL --exclude .CHANGELOG || die "cannot unpack $name"
     done
 
     results=()

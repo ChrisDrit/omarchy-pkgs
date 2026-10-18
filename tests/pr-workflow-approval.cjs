@@ -258,11 +258,10 @@ const resultJob = workflow.slice(workflow.indexOf('\n  result:\n'));
 const resultName = resultJob.match(/^    name: (.+)$/m)[1];
 const resultScript = resultJob.split('      - run: |\n')[1];
 function report({ trusted = 'false', vouch = 'unknown', empty = 'false', changes = 'success', build = 'skipped',
-  dkmsDecide = 'skipped', dkms = 'skipped' } = {}) {
+  dkms = 'skipped' } = {}) {
   const needs = {
     changes: { result: changes, outputs: { trusted, vouch_status: vouch, empty } },
     build: { result: build },
-    dkms_decide: { result: dkmsDecide },
     dkms: { result: dkms },
   };
   // The reporting expressions use &&, || and string equality, with the
@@ -304,10 +303,10 @@ test('applying build-approved transitions the waiting PR to the required build r
 // The DKMS jobs run only when the build ships a kernel or DKMS package;
 // skipped passes, a check that ran must have passed.
 test('a build whose kernels and DKMS modules build, or that ships none, passes', () => {
-  for (const [dkmsDecide, dkms] of [['success', 'success'], ['success', 'skipped'], ['skipped', 'skipped']]) {
-    const result = report({ trusted: 'true', vouch: 'vouched', build: 'success', dkmsDecide, dkms });
+  for (const dkms of ['success', 'skipped']) {
+    const result = report({ trusted: 'true', vouch: 'vouched', build: 'success', dkms });
     assert.equal(result.name, 'result');
-    assert.equal(result.status, 0, `${dkmsDecide}/${dkms}`);
+    assert.equal(result.status, 0, dkms);
   }
 });
 
@@ -326,9 +325,8 @@ for (const [name, overrides] of [
   ['cancelled planning', { changes: 'cancelled' }],
   ['empty PR', { empty: 'true' }],
   ['cancelled build', { trusted: 'true', build: 'cancelled' }],
-  ['failed DKMS check', { trusted: 'true', build: 'success', dkmsDecide: 'success', dkms: 'failure' }],
-  ['cancelled DKMS check', { trusted: 'true', build: 'success', dkmsDecide: 'success', dkms: 'cancelled' }],
-  ['failed DKMS decision', { trusted: 'true', build: 'success', dkmsDecide: 'failure' }],
+  ['failed DKMS check', { trusted: 'true', build: 'success', dkms: 'failure' }],
+  ['cancelled DKMS check', { trusted: 'true', build: 'success', dkms: 'cancelled' }],
 ]) {
   test(`${name} fails the required result instead of masquerading as pending approval`, () => {
     const result = report(overrides);

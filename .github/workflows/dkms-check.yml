@@ -6,15 +6,21 @@ name: DKMS check
 # linux-omarchy 7.2.8-9 renamed battery_hook_register and the TUXEDO modules
 # stopped building on 4.0.5.
 #
+# Fanned out: `plan` reads the channel on the host in seconds
+# (bin/check-dkms matrix), and every kernel and DKMS package pair gets its own
+# leg, which installs that kernel's headers and builds that package's trees in
+# a throwaway container. A leg is named for what it builds, so a red one says
+# which pair broke: "DKMS (x86_64, linux-omarchy 7.2.8-13, nvidia-open-dkms
+# 615.78.08-3)". A whole channel is a few minutes instead of one long job.
+#
 # It runs on its own:
-#   - in every pull request build that ships a kernel or DKMS package, on
-#     what it would publish (build-pr.yml's dkms jobs, which `result` needs);
+#   - in every pull request build that ships a kernel or DKMS package, on what
+#     it would publish (build-pr.yml calls this, and its `result` needs it);
 #   - before every promotion, on what moves (promote.yml calls this);
 #   - for a change to the check itself (pull_request below);
-#   - daily, for the DKMS packages Omarchy installs from Arch (ci/dkms-packages
-#     repo=), which Arch updates on its own schedule: against edge's kernels,
-#     and only when one of those packages or a kernel has a version no green
-#     run has seen yet (bin/check-dkms fingerprint).
+#   - daily, on every pair on edge that has not built at its versions yet:
+#     Arch updates the DKMS packages Omarchy installs from it (ci/dkms-packages
+#     repo=) on its own schedule.
 # By hand, for a whole channel or what differs from another one:
 #   gh workflow run dkms-check.yml -R omacom/omarchy-pkgs -f channel=stable
 #   gh workflow run dkms-check.yml -R omacom/omarchy-pkgs -f channel=edge -f since=rc
@@ -49,6 +55,23 @@ on:
         description: Only these packages or pkgbases (space-separated); empty means all
         type: string
         default: ""
+      # A pull request build (build-pr.yml): check what it would publish.
+      build_matrix:
+        description: The build's matrix; its artifacts are the packages to check
+        type: string
+        default: ""
+      reused:
+        description: Artifact labels the build's plan reused from earlier runs
+        type: string
+        default: "[]"
+      head_sha:
+        description: The commit the build's artifacts were made from
+        type: string
+        default: ""
+      tooling_ref:
+        description: Where bin/ and ci/ come from (a pull request's base branch)
+        type: string
+        default: ""
   pull_request:
     paths:
       - bin/check-dkms
@@ -57,64 +80,153 @@ on:
 
 permissions:
   contents: read
+  # bin/build-artifacts reads the build's artifacts; the daily plan looks up
+  # which legs already built.
+  actions: read
+
+# A newer push to a pull request cancels the run it supersedes. A fixed
+# prefix, not github.workflow: when build-pr.yml calls this, github.workflow
+# is the caller's name, and sharing its group would cancel the caller.
+concurrency:
+  group: dkms-check-${{ inputs.build_matrix && 'build' || 'channel' }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.channel || 'edge' }}-${{ inputs.since || 'all' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CHANNEL: ${{ inputs.channel || 'edge' }}
+  SINCE: ${{ inputs.since }}
+  PACKAGES: ${{ inputs.packages }}
+  FROM_REPOS: ${{ inputs.from_repos == true }}
 
 jobs:
-  check:
-    name: DKMS on ${{ inputs.channel || 'edge' }}${{ inputs.since && format(' since {0}', inputs.since) || '' }} (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-24.04
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-    # GitHub-hosted, with no secrets: the check only reads published packages,
-    # and it installs them as root in a throwaway container.
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 240
-    concurrency:
-      group: dkms-check-${{ github.event_name }}-${{ github.ref }}-${{ inputs.channel || 'edge' }}-${{ matrix.arch }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  plan:
+    name: DKMS plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      legs: ${{ steps.plan.outputs.legs }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tooling_ref }}
           persist-credentials: false
-      # The daily run builds only what no green run has built yet: the cache
-      # entry is the fingerprint of the versions it depends on.
-      - name: Fingerprint Arch's DKMS packages and edge's kernels
-        id: fingerprint
-        if: github.event_name == 'schedule'
-        run: |
-          print=$(bin/check-dkms fingerprint --arch "${{ matrix.arch }}" --channel edge)
-          printf '%s\n' "$print"
-          mkdir -p .dkms-seen
-          printf '%s\n' "$print" > .dkms-seen/fingerprint
-          echo "key=dkms-repos-${{ matrix.arch }}-$(sha256sum .dkms-seen/fingerprint | cut -c1-16)" >> "$GITHUB_OUTPUT"
-      - name: Look for a green run with the same fingerprint
-        id: seen
-        if: github.event_name == 'schedule'
-        uses: actions/cache/restore@v4
-        with:
-          path: .dkms-seen
-          key: ${{ steps.fingerprint.outputs.key }}
-          lookup-only: true
-      - name: Build DKMS modules against ${{ inputs.channel || 'edge' }} kernels
-        if: steps.seen.outputs.cache-hit != 'true'
+      - name: Plan the legs
+        id: plan
         env:
-          CHANNEL: ${{ inputs.channel || 'edge' }}
-          SINCE: ${{ inputs.since }}
-          PACKAGES: ${{ inputs.packages }}
-          FROM_REPOS: ${{ github.event_name == 'schedule' || inputs.from_repos == true }}
+          GH_TOKEN: ${{ github.token }}
+          BUILD_MATRIX: ${{ inputs.build_matrix }}
+          REUSED: ${{ inputs.reused || '[]' }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          TOOLING: ${{ hashFiles('bin/check-dkms', 'ci/dkms-packages') }}
         run: |
-          args=(--arch "${{ matrix.arch }}" --channel "$CHANNEL")
+          set -euo pipefail
+          # A pull request's base branch from before this check: nothing to run.
+          if [[ ! -x bin/check-dkms ]]; then
+            echo "::notice::The base branch has no DKMS check yet; it runs once this tooling is on the base branch."
+            echo "legs=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libarchive-tools >/dev/null
+          args=(--channel "$CHANNEL")
           [[ -z $SINCE ]] || args+=(--since "$SINCE")
           [[ -z $PACKAGES ]] || args+=(--packages "$PACKAGES")
           [[ $FROM_REPOS != true ]] || args+=(--from-repos)
+          # A pull request build: exactly what it would publish, this run's
+          # artifacts and the ones its plan reused. The legs get only the
+          # kernels and DKMS packages among them.
+          if [[ -n $BUILD_MATRIX ]]; then
+            git fetch --no-tags --depth=1 origin "$HEAD_SHA"
+            bin/build-artifacts built "$GITHUB_RUN_ID" "$BUILD_MATRIX" "$REUSED" "$HEAD_SHA"
+            args+=(--local built --save-local dkms-local)
+          fi
+          # Each architecture on its own, so a failure in either stops here.
+          x86_64=$(bin/check-dkms matrix --arch x86_64 "${args[@]}")
+          aarch64=$(bin/check-dkms matrix --arch aarch64 "${args[@]}")
+          legs=$(jq -cn --argjson a "$x86_64" --argjson b "$aarch64" '$a + $b')
+          # Daily: a leg that built at these versions before is not built
+          # again; each green leg saves its key (below, the same formula). An
+          # unused cache entry expires after 7 days, so every pair is still
+          # rebuilt weekly, on whatever toolchain edge has by then.
+          if [[ $GITHUB_EVENT_NAME == schedule ]]; then
+            keep='[]'
+            while IFS= read -r leg; do
+              key=$(jq -r --arg c "$CHANNEL" --arg t "${TOOLING:0:16}" \
+                '"dkms-\($c)-\(.arch)-\(.kernel | gsub(" "; "_"))-\(.module | gsub(" "; "_"))-\($t)"' <<<"$leg")
+              hits=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key" |
+                jq --arg k "$key" '[.actions_caches[] | select(.key == $k)] | length')
+              if ((hits)); then
+                echo "built before: $key"
+              else
+                keep=$(jq -c --argjson l "$leg" '. + [$l]' <<<"$keep")
+              fi
+            done < <(jq -c '.[]' <<<"$legs")
+            legs=$keep
+          fi
+          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          echo "$(jq length <<<"$legs") leg(s):"
+          jq -r '.[] | "  \(.arch)  \(.kernel)  \(.module)"' <<<"$legs"
+      - name: Keep the packages the legs install
+        if: inputs.build_matrix != '' && steps.plan.outputs.legs != '[]'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dkms-check-local
+          path: dkms-local
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # One leg per kernel and DKMS package pair. A static name: GitHub appends
+  # the leg's values, and a skipped job shows its name unevaluated.
+  check:
+    name: DKMS
+    needs: plan
+    if: needs.plan.outputs.legs != '[]' && needs.plan.outputs.legs != ''
+    strategy:
+      fail-fast: false
+      # A whole channel is about 45 legs; leave hosted runners for the
+      # package builds, which share them.
+      max-parallel: 12
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.legs) }}
+    # GitHub-hosted, with no secrets: the check only reads published packages,
+    # and it installs them as root in a throwaway container.
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    env:
+      ARCH: ${{ matrix.arch }}
+      KERNEL: ${{ matrix.kernel }}
+      MODULE: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tooling_ref }}
+          persist-credentials: false
+      - name: Fetch the build's kernels and DKMS packages
+        if: inputs.build_matrix != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: dkms-check-local
+          path: built
+      - name: Build ${{ matrix.module }} against ${{ matrix.kernel }}
+        run: |
+          args=(--arch "$ARCH" --channel "$CHANNEL" --kernel "$KERNEL" --module "$MODULE")
+          [[ -z $SINCE ]] || args+=(--since "$SINCE")
+          [[ -z $PACKAGES ]] || args+=(--packages "$PACKAGES")
+          [[ $FROM_REPOS != true ]] || args+=(--from-repos)
+          [[ ! -d built ]] || args+=(--local built)
           bin/check-dkms container "${args[@]}"
-      - name: Remember this fingerprint as built
-        if: github.event_name == 'schedule' && steps.seen.outputs.cache-hit != 'true'
+      # The daily plan skips a leg whose key exists (the same formula as there).
+      - name: Remember this leg as built
+        id: seen
+        if: github.event_name == 'schedule'
+        env:
+          TOOLING: ${{ hashFiles('bin/check-dkms', 'ci/dkms-packages') }}
+        run: |
+          key="dkms-$CHANNEL-$ARCH-${KERNEL// /_}-${MODULE// /_}-${TOOLING:0:16}"
+          mkdir -p .dkms-seen
+          echo "$key" > .dkms-seen/key
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - if: github.event_name == 'schedule'
         uses: actions/cache/save@v4
         with:
           path: .dkms-seen
-          key: ${{ steps.fingerprint.outputs.key }}
+          key: ${{ steps.seen.outputs.key }}

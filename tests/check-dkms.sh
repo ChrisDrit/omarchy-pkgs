@@ -76,6 +76,7 @@ package() { # package <dir> <name> <version> <arch> <path>...
   rm -rf "$root"
   mkdir -p "$root"
   printf 'pkgname = %s\npkgver = %s\narch = %s\n' "$2" "$3" "$4" >"$root/.PKGINFO"
+  [[ -z ${PKGBASE:-} ]] || echo "pkgbase = $PKGBASE" >>"$root/.PKGINFO"
   for path in "${@:5}"; do mkdir -p "$root/${path%/*}"; touch "$root/$path"; done
   mkdir -p "$1"
   bsdtar -cf "$1/$2-$3-$4.pkg.tar.zst" --zstd -C "$root" .PKGINFO usr
@@ -189,21 +190,56 @@ plan=$(check --local "$tmp/local-new") || fail "an unlisted fresh DKMS package p
   grep -q 'hid-nintendo2-dkms is not in ci/dkms-packages yet' "$tmp/stderr" &&
   pass "an unlisted fresh DKMS package is checked against every kernel" || fail "new recipe: $plan $(cat "$tmp/stderr")"
 
-# needs: whether a build holds anything to check, decided before any container.
+# matrix: the legs a CI run fans out into, one per kernel and DKMS package,
+# decided on the host before any container.
+matrix() { "$ROOT/bin/check-dkms" matrix --arch "${ARCH:-x86_64}" --files-db "$tmp/edge.files" "$@" 2>"$tmp/stderr"; }
+legs=$(matrix) || fail "a channel's matrix: $(cat "$tmp/stderr")"
+jq -e 'length == 2 and (map(.module) | sort) == ["intel-ipu7-camera 1.0.6-3", "tuxedo-drivers-nocompatcheck-dkms 4.22.1-2"]
+  and all(.arch == "x86_64" and .kernel == "linux-omarchy-headers 7.2.8-9")' <<<"$legs" >/dev/null &&
+  pass "a channel's matrix has one leg per kernel and DKMS package, named with versions, however many trees it ships" || fail "legs: $legs"
 package "$tmp/local-plain" hyprland 0.56.2-5 x86_64 usr/bin/Hyprland
-"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local-plain" >/dev/null &&
-  fail "a build without kernels or DKMS packages needs no check" || pass "a build without kernels or DKMS packages needs no check"
-"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local" | grep -q 'tuxedo-drivers-nocompatcheck-dkms-4.22.1-3-x86_64.pkg.tar.zst (dkms)' &&
-  pass "a build with a DKMS package needs a check, and says which" || fail "needs dkms"
-"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local-kernel" | grep -q '(kernel)' &&
-  pass "a build with a kernel needs a check" || fail "needs kernel"
-"$ROOT/bin/check-dkms" needs --arch aarch64 --local "$tmp/local-kernel" >/dev/null &&
-  fail "another architecture's kernel needs no check" || pass "another architecture's kernel needs no check"
-"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local-lost" >/dev/null &&
-  fail "without the channel, a headers package that lost its tree looks like nothing to check" ||
-  pass "without the channel, a headers package that lost its tree looks like nothing to check"
-"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local-lost" --files-db "$tmp/edge.files" | grep -q 'published as a kernel or DKMS package' &&
-  pass "a package the channel publishes as a kernel needs a check even after losing its tree" || fail "needs lost role"
+[[ $(matrix --local "$tmp/local-plain") == '[]' ]] &&
+  pass "a build without kernels or DKMS packages has no legs" || fail "plain: $(cat "$tmp/stderr")"
+legs=$(matrix --local "$tmp/local")
+jq -e '. == [{"arch": "x86_64", "kernel": "linux-omarchy-headers 7.2.8-9", "module": "tuxedo-drivers-nocompatcheck-dkms 4.22.1-3"}]' <<<"$legs" >/dev/null &&
+  pass "a build with a DKMS package has a leg per kernel for it" || fail "dkms legs: $legs"
+legs=$(matrix --local "$tmp/local-kernel")
+jq -e 'length == 2 and all(.kernel == "linux-omarchy-headers 7.2.9-1")' <<<"$legs" >/dev/null &&
+  pass "a build with a kernel has a leg per module for it" || fail "kernel legs: $legs"
+[[ $(ARCH=aarch64 matrix --local "$tmp/local-kernel") == '[]' ]] &&
+  pass "an architecture the build has nothing for has no legs, not an error" || fail "other arch: $(cat "$tmp/stderr")"
+if matrix --local "$tmp/local-lost" >/dev/null; then fail "a kernel that lost its tree must fail the matrix"; fi
+grep -q "the local linux-omarchy-headers is a 'other' package, but the published one is 'kernel'" "$tmp/stderr" &&
+  pass "a package that lost its role fails the matrix, before any container" || fail "lost: $(cat "$tmp/stderr")"
+
+# --save-local keeps what the legs install: kernels and DKMS packages.
+package "$tmp/local-mixed" hyprland 0.56.2-5 x86_64 usr/bin/Hyprland
+package "$tmp/local-mixed" linux-omarchy-headers 7.2.9-1 x86_64 usr/lib/modules/7.2.9-1-omarchy/build/Makefile
+package "$tmp/local-mixed" yt6801-dkms 1.0.34-2 aarch64 usr/src/yt6801-1.0.34/dkms.conf
+# The fixture channel stands in for both architectures here.
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64 aarch64' 'intel-ipu7-camera x86_64 aarch64' 'yt6801-dkms aarch64' >"$tmp/registry-both"
+matrix --local "$tmp/local-mixed" --save-local "$tmp/saved" >/dev/null &&
+  OMARCHY_DKMS_REGISTRY="$tmp/registry-both" ARCH=aarch64 matrix --local "$tmp/local-mixed" --save-local "$tmp/saved" >/dev/null ||
+  fail "save-local: $(cat "$tmp/stderr")"
+[[ $(ls "$tmp/saved" | tr '\n' ' ') == "linux-omarchy-headers-7.2.9-1-x86_64.pkg.tar.zst yt6801-dkms-1.0.34-2-aarch64.pkg.tar.zst " ]] &&
+  pass "--save-local keeps each architecture's kernels and DKMS packages, nothing else" || fail "saved: $(ls "$tmp/saved")"
+
+# One leg: --kernel (headers name or pkgbase) and --module keep its pairs only.
+plan=$(check --kernel linux-omarchy-headers --module intel-ipu7-camera) || fail "leg: $(cat "$tmp/stderr")"
+[[ $(grep -c '^pair' <<<"$plan") == 2 ]] && ! grep -q $'^pair\t.*tuxedo' <<<"$plan" &&
+  pass "a leg keeps every tree of its module against its kernel, and nothing else" || fail "leg: $plan"
+PKGBASE=linux-omarchy package "$tmp/local-base" linux-omarchy-headers 7.2.9-1 x86_64 usr/lib/modules/7.2.9-1-omarchy/build/Makefile
+legs=$(matrix --local "$tmp/local-base")
+jq -e 'all(.kernel == "linux-omarchy 7.2.9-1")' <<<"$legs" >/dev/null &&
+  plan=$(check --local "$tmp/local-base" --kernel "linux-omarchy 7.2.9-1" --module "tuxedo-drivers-nocompatcheck-dkms 4.22.1-2") &&
+  [[ $(grep -c '^pair' <<<"$plan") == 1 ]] &&
+  pass "legs name a kernel by its pkgbase, and --kernel finds it by that" || fail "pkgbase: $legs $plan $(cat "$tmp/stderr")"
+if check --kernel linux-gone >/dev/null; then fail "a leg the plan no longer has must fail"; fi
+grep -q 'this plan has no pair for kernel linux-gone' "$tmp/stderr" &&
+  pass "a leg whose pair left the plan fails, so the run is redone" || fail "gone: $(cat "$tmp/stderr")"
+if check --kernel "linux-omarchy-headers 7.2.8-8" >/dev/null; then fail "a leg for a version the channel moved past must fail"; fi
+grep -q 'this plan has no pair for kernel linux-omarchy-headers 7.2.8-8' "$tmp/stderr" &&
+  pass "a leg for a version the channel no longer has fails, not checks the new one" || fail "moved: $(cat "$tmp/stderr")"
 
 # run installs packages, so it must refuse to start without root. Checked only
 # when not root: as root it would really install them.

@@ -14,25 +14,30 @@
 # from this one (ci/dkms-packages marks them repo=<name>). They are read from
 # the channel's Arch mirror, the snapshot that channel's machines install
 # from. They never move with this repository, so they are checked whenever a
-# kernel changes; --from-repos checks them against every kernel, for the daily
-# run that catches Arch updating them.
+# kernel changes; --from-repos checks only them, against every kernel. The
+# daily CI run (dkms-check.yml) checks every pair on edge that has not built
+# at its versions before, which catches Arch updating one of them.
 #
 # Usage:
 #   bin/check-dkms plan --arch <arch> --files-db <omarchy.files>
 #                       [--local <dir>] [--since-db <omarchy.files>]
 #                       [--repo-files-db <repo>=<repo.files> ...] [--from-repos]
 #       Print the kernels, the DKMS packages and the pairs a run would build.
+#   bin/check-dkms matrix --arch <arch> [--channel <channel> | --files-db <omarchy.files>]
+#                         [the options of run or plan] [--save-local <dir>]
+#       Print the run's legs as a JSON array for a CI matrix, [] for none: one
+#       {"arch", "kernel": "<pkgbase> <version>", "module": "<name> <version>"}
+#       per kernel and DKMS package it builds. Runs on the host (curl and
+#       bsdtar). --save-local copies --local's kernels and DKMS packages, all
+#       the legs need, into <dir>.
 #   bin/check-dkms run --arch <arch> --channel <channel> [--local <dir>] [--since <channel>]
 #                      [--packages "<name|pkgbase> ..."] [--from-repos]
+#                      [--kernel "<name|pkgbase> [version]"] [--module "<name> [version]"]
 #       Run the check, as root, in a disposable Arch (x86_64) or Arch Linux ARM
-#       (aarch64) system: it installs packages.
+#       (aarch64) system: it installs packages. --kernel and --module keep only
+#       the pairs of one leg, at the versions the leg names.
 #   bin/check-dkms container <same options as run>
 #       Run it in a throwaway container of the right image (needs Docker).
-#   bin/check-dkms needs --arch <arch> --local <dir> [--channel <channel> | --files-db <omarchy.files>]
-#       Exit 0 when <dir> holds a kernel or DKMS package for <arch>, or a
-#       package the channel publishes as one (so losing that role is caught).
-#   bin/check-dkms fingerprint --arch <arch> --channel <channel>
-#       Print the versions a --from-repos run depends on (curl and tar only).
 set -euo pipefail
 
 ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -42,12 +47,13 @@ X86_64_IMAGE=${OMARCHY_DKMS_X86_64_IMAGE:-ghcr.io/archlinux/archlinux:base-devel
 AARCH64_IMAGE=${OMARCHY_DKMS_AARCH64_IMAGE:-ghcr.io/menci/archlinuxarm@sha256:3e1074c407fc1a57c2a2117af6920c96a7cc906fa6f1f2da8a4a7fd3aa2c2f4e}
 
 die() { echo "check-dkms: $*" >&2; exit 2; }
-usage() { sed -n '20,35p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '21,40p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 mode=${1:-}
 [[ -n $mode ]] || usage
 shift
 arch="" channel="" files_db="" local_dir="" since="" since_db="" only="" from_repos=0
+pair_kernel="" pair_module="" save_local=""
 repo_dbs=()
 while (($#)); do
   case $1 in
@@ -60,13 +66,19 @@ while (($#)); do
     --packages) only=${2-}; shift 2 ;;
     --repo-files-db) repo_dbs+=("${2:?--repo-files-db needs <repo>=<file>}"); shift 2 ;;
     --from-repos) from_repos=1; shift ;;
+    --kernel) pair_kernel=${2:?--kernel needs a value}; shift 2 ;;
+    --module) pair_module=${2:?--module needs a value}; shift 2 ;;
+    --save-local) save_local=${2:?--save-local needs a value}; shift 2 ;;
     *) usage ;;
   esac
 done
 case $arch in x86_64 | aarch64) ;; *) die "--arch must be x86_64 or aarch64" ;; esac
-# run downloads repo= packages from the channel's mirror; plan only lists them.
+# run, and matrix without --files-db, download the channel's databases and the
+# repo= packages' from its mirror; plan only reads the files it is given.
+download=0
+[[ $mode != run && ($mode != matrix || -n $files_db) ]] || download=1
 REPO_CHANNEL=""
-[[ $mode != run ]] || REPO_CHANNEL=$channel
+((!download)) || REPO_CHANNEL=$channel
 if [[ -n $local_dir ]]; then
   [[ -d $local_dir ]] || die "--local $local_dir is not a directory"
 fi
@@ -203,7 +215,8 @@ read_local() {
     printf '%s\t%s\t%s\t%s\t-\t%s\t%s\n' "${role%%$'\t'*}" "$name" "$version" "$pkg" "${role#*$'\t'}" "${base:-$name}"
     found=1
   done
-  ((found)) || die "--local $local_dir holds no package for $arch"
+  # matrix asks about each architecture; one with nothing built has no legs.
+  ((found)) || [[ $mode == matrix ]] || die "--local $local_dir holds no package for $arch"
 }
 
 # The packages a check runs over: the channel's, with --local's in place of
@@ -300,7 +313,12 @@ pairs() {
 
 plan_for() { # plan_for <channel db> [since db]: sets PACKAGES, CHANGED, PAIRS
   local fresh="" previous="" published repos="" ours
-  [[ -z $local_dir ]] || fresh=$(read_local)
+  PACKAGES="" CHANGED="" PAIRS=""
+  if [[ -n $local_dir ]]; then
+    fresh=$(read_local)
+    # Only matrix gets here with nothing built for this architecture.
+    [[ -n $fresh ]] || return 0
+  fi
   [[ -z ${2:-} ]] || previous=$(read_db "$2")
   published=$(read_db "$1")
   if [[ -n $REPOS ]] && repos_needed "$published" "$fresh" "$previous"; then
@@ -328,6 +346,42 @@ plan_for() { # plan_for <channel db> [since db]: sets PACKAGES, CHANGED, PAIRS
   fi
   CHANGED=$(changed_names "$PACKAGES" "$fresh" "$previous")
   PAIRS=$(pairs "$PACKAGES" "$CHANGED")
+  # One leg of a matrix: the pairs of one kernel (headers name or pkgbase) and
+  # one DKMS package, at the versions the leg names, if it names them. A leg
+  # the plan no longer has means the channel moved after the matrix was made:
+  # fail, so the run is redone, not passed.
+  if [[ -n $pair_kernel || -n $pair_module ]]; then
+    PAIRS=$(awk -F'\t' -v k="$pair_kernel" -v m="$pair_module" 'FNR == 1 {
+        file++
+        split(k, kk, " "); split(m, mm, " ")
+      }
+      file == 1 { base[$2] = $7; ver[$2] = $3; next }
+      $1 != "" && (kk[1] == "" || $1 == kk[1] || base[$1] == kk[1]) && (kk[2] == "" || ver[$1] == kk[2]) &&
+        (mm[1] == "" || $3 == mm[1]) && (mm[2] == "" || ver[$3] == mm[2])' \
+      <(printf '%s\n' "$PACKAGES") <(printf '%s\n' "$PAIRS"))
+    [[ -n $PAIRS ]] || die "this plan has no pair${pair_kernel:+ for kernel $pair_kernel}${pair_module:+ and module $pair_module}; the channel moved since the matrix was made, so run it again"
+  fi
+}
+
+# The plan's legs as a JSON array: one per kernel (by pkgbase) and DKMS
+# package, each named with its version.
+legs() {
+  awk -F'\t' -v a="$arch" 'FNR == 1 { file++ }
+    file == 1 { base[$2] = $7; ver[$2] = $3; next }
+    $1 != "" && !seen[$1 "\t" $3]++ {
+      printf "%s{\"arch\":\"%s\",\"kernel\":\"%s %s\",\"module\":\"%s %s\"}", (n++ ? "," : "["), a, base[$1], ver[$1], $3, ver[$3]
+    }
+    END { print (n ? "]" : "[]") }' <(printf '%s\n' "$PACKAGES") <(printf '%s\n' "$PAIRS")
+}
+
+# The channel's files database, and --since's, into $work.
+download_channel() {
+  curl -fsSL --retry 3 -o "$work/channel.files" "$PKGS_BASE/$channel/$arch/omarchy.files" || die "cannot download $channel/$arch/omarchy.files"
+  files_db=$work/channel.files
+  if [[ -n $since ]]; then
+    curl -fsSL --retry 3 -o "$work/since.files" "$PKGS_BASE/$since/$arch/omarchy.files" || die "cannot download $since/$arch/omarchy.files"
+    since_db=$work/since.files
+  fi
 }
 
 # repo= packages can only pair with a kernel. They are needed when every
@@ -346,7 +400,7 @@ repos_needed() { # repos_needed <published> <fresh> <previous>
 
 # plan reads the repo files databases it was given; run downloads them.
 load_repo_dbs() {
-  [[ $mode == run ]] || return 0
+  ((download)) || return 0
   local repo
   while IFS= read -r repo; do
     [[ -n $repo ]] || continue
@@ -366,66 +420,37 @@ print_plan() {
 }
 
 case $mode in
-  needs)
-    # Exit 0, naming them, when --local holds a kernel or DKMS package for
-    # this architecture, or a package the channel publishes as one: a recipe
-    # that lost its headers tree or dkms.conf must reach the check, which
-    # refuses it. 1 when there is nothing to check. Runs on the CI host,
-    # before any container: a pull request with neither skips the check.
-    [[ -n $local_dir ]] || die "needs needs --local"
-    published=""
-    if [[ -n $channel ]]; then
+  matrix)
+    # The legs a CI run fans out into, each built by run --kernel --module.
+    # A build with nothing for this architecture has none; nothing to download.
+    if [[ -n $local_dir && -z $(read_local) ]]; then
+      echo "$arch: this build has nothing for $arch" >&2
+      echo '[]'
+      exit 0
+    fi
+    if ((download)); then
+      [[ -n $channel ]] || die "matrix needs --channel or --files-db"
       work=$(mktemp -d)
       trap 'rm -rf "$work"' EXIT
-      curl -fsSL --retry 3 -o "$work/channel.files" "$PKGS_BASE/$channel/$arch/omarchy.files" || die "cannot download $channel/$arch/omarchy.files"
-      files_db=$work/channel.files
+      download_channel
     fi
-    [[ -z $files_db ]] || published=$(read_db "$files_db" | awk -F'\t' '$1 == "kernel" || $1 == "dkms" { print $2 }')
-    found=1
-    for pkg in "$local_dir"/*.pkg.tar.*; do
-      [[ -f $pkg && $pkg != *.sig ]] || continue
-      info=$(bsdtar -xOf "$pkg" .PKGINFO) || die "cannot read $pkg"
-      name=$(awk -F' = ' '$1 == "pkgname" { print $2; exit }' <<<"$info")
-      parch=$(awk -F' = ' '$1 == "arch" { print $2; exit }' <<<"$info")
-      [[ $parch == "$arch" || $parch == any ]] || continue
-      list=$(bsdtar -tf "$pkg") || die "cannot list $pkg"
-      kind=$(classify <<<"$list" | cut -f1)
-      if [[ $kind == kernel || $kind == dkms ]]; then
-        echo "${pkg##*/} ($kind)"
-        found=0
-      elif grep -qxF -- "$name" <<<"$published"; then
-        echo "${pkg##*/} (published as a kernel or DKMS package)"
-        found=0
-      fi
-    done
-    exit "$found"
-    ;;
-
-  fingerprint)
-    # The repo= packages' versions on the channel's mirror and the channel's
-    # headers packages: a daily --from-repos run that finds these unchanged
-    # since its last green run has nothing new to build. Runs on the CI host,
-    # which has GNU tar but not bsdtar.
-    [[ -n $channel ]] || die "fingerprint needs --channel"
-    work=$(mktemp -d)
-    trap 'rm -rf "$work"' EXIT
-    curl -fsSL --retry 3 -o "$work/channel.files" "$PKGS_BASE/$channel/$arch/omarchy.files" || die "cannot download $channel/$arch/omarchy.files"
-    # Every read is checked: a fingerprint that silently lost a part would be
-    # remembered as built and hide that part's later updates.
-    entries=$(tar -tf "$work/channel.files") || die "cannot read $channel/$arch/omarchy.files"
-    kernels=$(awk -F/ 'NF > 1 && $1 ~ /-headers-/ { print $1 }' <<<"$entries" | sort -u)
-    [[ -n $kernels ]] || die "$channel/$arch publishes no headers package"
-    printf '%s\n' "$kernels"
-    while IFS=$'\t' read -r name repo; do
-      [[ -n $name ]] || continue
-      if [[ ! -f $work/$repo.db ]]; then
-        curl -fsSL --retry 3 -o "$work/$repo.db" "$(repo_url "$channel" "$repo")/$repo.db" || die "cannot download $repo.db from the $channel mirror"
-        tar -tf "$work/$repo.db" | awk -F/ 'NF > 1 { print $1 }' | sort -u >"$work/$repo.list" || die "cannot read $repo.db from the $channel mirror"
-      fi
-      found=$(grep -E "^${name//./\\.}-[0-9]" "$work/$repo.list" || true)
-      [[ -n $found ]] || die "$repo on the $channel mirror has no $name"
-      printf '%s\n' "$found"
-    done <<<"$REPOS"
+    [[ -z $since_db || -f $since_db ]] || die "--since-db $since_db is not a file"
+    check_registry "$(read_db "$files_db")" || exit 1
+    plan_for "$files_db" "$since_db"
+    if [[ -n $PAIRS ]]; then
+      print_plan >&2
+    else
+      echo "$arch: nothing to check" >&2
+    fi
+    if [[ -n $save_local ]]; then
+      [[ -n $local_dir ]] || die "--save-local needs --local"
+      mkdir -p "$save_local"
+      while IFS=$'\t' read -r kind _ _ file _; do
+        [[ $kind == kernel || $kind == dkms ]] || continue
+        cp -- "$file" "$save_local/" || die "cannot copy ${file##*/} to $save_local"
+      done < <(read_local)
+    fi
+    legs
     ;;
 
   plan)
@@ -448,6 +473,8 @@ case $mode in
     [[ -z $since ]] || args+=(--since "$since")
     [[ -z $only ]] || args+=(--packages "$only")
     ((!from_repos)) || args+=(--from-repos)
+    [[ -z $pair_kernel ]] || args+=(--kernel "$pair_kernel")
+    [[ -z $pair_module ]] || args+=(--module "$pair_module")
     if [[ -n $local_dir ]]; then
       mounts+=(-v "$(realpath "$local_dir"):/local:ro")
       args+=(--local /local)
@@ -465,14 +492,10 @@ case $mode in
     [[ -n $channel ]] || die "run needs --channel"
     ((EUID == 0)) || die "run installs packages; run it as root in a disposable system"
     work=$(mktemp -d)
-    curl -fsSL --retry 3 -o "$work/channel.files" "$PKGS_BASE/$channel/$arch/omarchy.files" || die "cannot download $channel/$arch/omarchy.files"
-    if [[ -n $since ]]; then
-      curl -fsSL --retry 3 -o "$work/since.files" "$PKGS_BASE/$since/$arch/omarchy.files" || die "cannot download $since/$arch/omarchy.files"
-    fi
-    published=$(read_db "$work/channel.files")
-    check_registry "$published" || exit 1
-    plan_for "$work/channel.files" "${since:+$work/since.files}"
-    echo "==> $channel/$arch${since:+, changes since $since}${local_dir:+, with $local_dir}:"
+    download_channel
+    check_registry "$(read_db "$files_db")" || exit 1
+    plan_for "$files_db" "$since_db"
+    echo "==> $channel/$arch${since:+, changes since $since}${local_dir:+, with $local_dir}${pair_kernel:+, kernel $pair_kernel}${pair_module:+, module $pair_module}:"
     print_plan | column -t -s $'\t'
     if [[ -z $PAIRS ]]; then
       echo "### DKMS on $channel/$arch: nothing to check" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"

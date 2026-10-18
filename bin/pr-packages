@@ -1,0 +1,50 @@
+#!/bin/bash
+# Collect every package a pull request's head commit builds into <dest>,
+# wherever it was built. build-pr.yml reuses the artifact of a package whose
+# exact tree already built once (label <package>-<arch>-<tree hash>), so the
+# build run a check reports on may hold none of the pull request's packages.
+# Looking each one up by its label finds the same bytes publish.yml ships on
+# merge. A package with no live artifact at its tree did not build, so it
+# cannot publish either; it is named and skipped.
+#
+# Usage: bin/pr-packages <pull request> <sha> <dest>
+#   Needs GH_TOKEN and GITHUB_REPOSITORY, and runs in a checkout of this
+#   repository (it fetches <sha> to read package trees; nothing from the pull
+#   request is executed).
+set -euo pipefail
+ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
+# shellcheck source=helpers/artifact-helpers.sh
+source "$ROOT/helpers/artifact-helpers.sh"
+
+die() { echo "pr-packages: $*" >&2; exit 2; }
+(($# == 3)) || die "usage: bin/pr-packages <pull request> <sha> <dest>"
+pr=$1 sha=$2 dest=$3
+repo=${GITHUB_REPOSITORY:?pr-packages needs GITHUB_REPOSITORY}
+mkdir -p "$dest"
+
+git -C "$ROOT" fetch -q --no-tags --depth=1 origin "$sha" || die "cannot fetch $sha"
+names=$(gh api --paginate "repos/$repo/pulls/$pr/files" --jq '.[].filename' |
+  awk -F/ '$1 == "pkgbuilds" && NF > 2 { print $2 }' | sort -u) || die "cannot list pull request $pr's files"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+while IFS= read -r name; do
+  [[ -n $name ]] || continue
+  # A package the pull request deletes has nothing to build.
+  tree=$(git -C "$ROOT" rev-parse -q --verify "$sha:pkgbuilds/$name" 2>/dev/null) || continue
+  found=0
+  for arch in x86_64 aarch64; do
+    label=$name-$arch-$tree
+    id=$(gh api "repos/$repo/actions/artifacts?name=$label&per_page=20" \
+      --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .id // empty') ||
+      die "cannot look up artifact $label"
+    [[ -n $id ]] || continue
+    gh api "repos/$repo/actions/artifacts/$id/zip" >"$work/$label.zip" || die "cannot download artifact $label"
+    mkdir -p "$work/$label"
+    unzip -q -o "$work/$label.zip" -d "$work/$label" || die "cannot unpack artifact $label"
+    unpack_packages "$work/$label" "$dest" || die "artifact $label holds no packages"
+    echo "$label"
+    found=1
+  done
+  ((found)) || echo "pr-packages: note: no live build artifact for $name at $tree; it did not build, so it does not publish" >&2
+done <<<"$names"

@@ -163,6 +163,22 @@ plan=$(check "${repo[@]}" --local "$tmp/local-own")
 grep -qP '^dkms\tv4l2loopback-dkms\t0.15.5-1\t' <<<"$plan" && [[ $(grep -c $'^dkms\tv4l2loopback-dkms' <<<"$plan") == 1 ]] &&
   grep -q 'v4l2loopback-dkms is built here too' "$tmp/stderr" &&
   pass "this repository's own copy of a repo= package is the one checked" || fail "own copy: $plan $(cat "$tmp/stderr")"
+plan=$(check "${repo[@]}" --since-db "$tmp/edge.files" --from-repos)
+[[ $(grep -c '^pair' <<<"$plan") == 1 ]] && grep -qP '^pair\tlinux-omarchy-headers 7.2.8-9-omarchy\tv4l2loopback-dkms ' <<<"$plan" &&
+  pass "--from-repos checks repo= packages even alongside --since" || fail "from-repos since: $plan"
+
+# This repository's own copy of a repo= name moves with promotions like any
+# other package.
+for db in own-old own-new; do
+  entry $db linux-omarchy-headers 7.2.8-9 usr/lib/modules/7.2.8-9-omarchy/build/Makefile
+done
+entry own-old v4l2loopback-dkms 0.15.4-1 usr/src/v4l2loopback-0.15.4/dkms.conf
+entry own-new v4l2loopback-dkms 0.15.5-1 usr/src/v4l2loopback-0.15.5/dkms.conf
+channel own-old
+channel own-new
+plan=$("$ROOT/bin/check-dkms" plan --arch x86_64 --files-db "$tmp/own-new.files" --since-db "$tmp/own-old.files" "${repo[@]}" 2>/dev/null)
+grep -qP '^pair\tlinux-omarchy-headers 7.2.8-9-omarchy\tv4l2loopback-dkms v4l2loopback-0.15.5$' <<<"$plan" &&
+  pass "a promotion that moves this repository's copy of a repo= name checks it" || fail "own copy promoted: $plan"
 printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' >"$tmp/registry"
 
 # A pull request that adds a DKMS recipe is checked before it publishes, even
@@ -183,6 +199,11 @@ package "$tmp/local-plain" hyprland 0.56.2-5 x86_64 usr/bin/Hyprland
   pass "a build with a kernel needs a check" || fail "needs kernel"
 "$ROOT/bin/check-dkms" needs --arch aarch64 --local "$tmp/local-kernel" >/dev/null &&
   fail "another architecture's kernel needs no check" || pass "another architecture's kernel needs no check"
+"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local-lost" >/dev/null &&
+  fail "without the channel, a headers package that lost its tree looks like nothing to check" ||
+  pass "without the channel, a headers package that lost its tree looks like nothing to check"
+"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local-lost" --files-db "$tmp/edge.files" | grep -q 'published as a kernel or DKMS package' &&
+  pass "a package the channel publishes as a kernel needs a check even after losing its tree" || fail "needs lost role"
 
 # run installs packages, so it must refuse to start without root. Checked only
 # when not root: as root it would really install them.

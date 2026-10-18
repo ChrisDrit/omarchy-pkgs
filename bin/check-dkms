@@ -28,8 +28,9 @@
 #       (aarch64) system: it installs packages.
 #   bin/check-dkms container <same options as run>
 #       Run it in a throwaway container of the right image (needs Docker).
-#   bin/check-dkms needs --arch <arch> --local <dir>
-#       Exit 0 when <dir> holds a kernel or DKMS package for <arch>, else 1.
+#   bin/check-dkms needs --arch <arch> --local <dir> [--channel <channel> | --files-db <omarchy.files>]
+#       Exit 0 when <dir> holds a kernel or DKMS package for <arch>, or a
+#       package the channel publishes as one (so losing that role is caught).
 #   bin/check-dkms fingerprint --arch <arch> --channel <channel>
 #       Print the versions a --from-repos run depends on (curl and tar only).
 set -euo pipefail
@@ -41,7 +42,7 @@ X86_64_IMAGE=${OMARCHY_DKMS_X86_64_IMAGE:-ghcr.io/archlinux/archlinux:base-devel
 AARCH64_IMAGE=${OMARCHY_DKMS_AARCH64_IMAGE:-ghcr.io/menci/archlinuxarm@sha256:3e1074c407fc1a57c2a2117af6920c96a7cc906fa6f1f2da8a4a7fd3aa2c2f4e}
 
 die() { echo "check-dkms: $*" >&2; exit 2; }
-usage() { sed -n '20,34p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '20,35p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 mode=${1:-}
 [[ -n $mode ]] || usage
@@ -86,6 +87,9 @@ REPOS=$(awk -v a="$arch" '!/^[[:space:]]*(#|$)/ {
     if (ok && r != "") print $1 "\t" r
   }' "$REGISTRY")
 from_repo() { awk -F'\t' -v n="$1" '$1 == n { f = 1 } END { exit !f }' <<<"$REPOS"; }
+# The repo= packages this plan really takes from Arch: those this repository
+# does not build itself. Set by plan_for; empty when none were needed.
+ARCH_SOURCED=""
 
 # Where a channel's machines get Arch packages, x86_64 per channel
 # (default/pacman/mirrorlist-* in omacom/omarchy), aarch64 one mirror for all.
@@ -228,8 +232,7 @@ changed_names() {
   local names
   names=$(changed_unfiltered "$@")
   if ((from_repos)); then
-    names=$(awk -F'\t' 'FNR == 1 { file++ } file == 1 { if ($1 != "") r[$1] = 1; next } ($0 in r)' \
-      <(printf '%s\n' "$REPOS") <(printf '%s\n' "$names"))
+    names=$ARCH_SOURCED
   fi
   if [[ -n $only ]]; then
     # Keep a name when it, or its pkgbase, is one of --packages.
@@ -246,10 +249,11 @@ changed_unfiltered() {
   if [[ -n $fresh ]]; then
     cut -f2 <<<"$fresh"
   elif [[ -n $previous ]]; then
-    # A repo= package does not move with a promotion: it pairs through kernels.
-    awk -F'\t' 'FNR == 1 { file++ } file == 1 { if ($1 != "") r[$1] = 1; next }
+    # A package taken from Arch does not move with a promotion: it pairs
+    # through kernels. This repository's own copy of a repo= name does move.
+    awk -F'\t' 'FNR == 1 { file++ } file == 1 { if ($0 != "") r[$0] = 1; next }
       file == 2 { v[$2] = $3; next } $2 != "" && v[$2] != $3 && !($2 in r) { print $2 }' \
-      <(printf '%s\n' "$REPOS") <(printf '%s\n' "$previous") <(printf '%s\n' "$packages")
+      <(printf '%s\n' "$ARCH_SOURCED") <(printf '%s\n' "$previous") <(printf '%s\n' "$packages")
   else
     cut -f2 <<<"$packages"
   fi
@@ -307,6 +311,7 @@ plan_for() { # plan_for <channel db> [since db]: sets PACKAGES, CHANGED, PAIRS
     repos=$(awk -F'\t' 'FNR == 1 { file++ } file == 1 { if ($0 != "") o[$0] = 1; next }
       ($2 in o) { print "check-dkms: note: " $2 " is built here too; the Arch copy is not checked (drop its repo= from ci/dkms-packages)" > "/dev/stderr"; next } { print }' \
       <(printf '%s\n' "$ours") <(printf '%s\n' "$repos"))
+    ARCH_SOURCED=$(awk -F'\t' '$1 == "dkms" { print $2 }' <<<"$repos")
   fi
   PACKAGES=$(compose "$(printf '%s\n%s\n' "$published" "$repos" | sed '/^$/d')" "$fresh")
   # Listed DKMS packages, and every fresh one: a pull request that adds a new
@@ -363,18 +368,33 @@ print_plan() {
 case $mode in
   needs)
     # Exit 0, naming them, when --local holds a kernel or DKMS package for
-    # this architecture; 1 when there is nothing to check. Runs on the CI
-    # host, before any container: a pull request with neither skips the check.
+    # this architecture, or a package the channel publishes as one: a recipe
+    # that lost its headers tree or dkms.conf must reach the check, which
+    # refuses it. 1 when there is nothing to check. Runs on the CI host,
+    # before any container: a pull request with neither skips the check.
     [[ -n $local_dir ]] || die "needs needs --local"
+    published=""
+    if [[ -n $channel ]]; then
+      work=$(mktemp -d)
+      trap 'rm -rf "$work"' EXIT
+      curl -fsSL --retry 3 -o "$work/channel.files" "$PKGS_BASE/$channel/$arch/omarchy.files" || die "cannot download $channel/$arch/omarchy.files"
+      files_db=$work/channel.files
+    fi
+    [[ -z $files_db ]] || published=$(read_db "$files_db" | awk -F'\t' '$1 == "kernel" || $1 == "dkms" { print $2 }')
     found=1
     for pkg in "$local_dir"/*.pkg.tar.*; do
       [[ -f $pkg && $pkg != *.sig ]] || continue
       info=$(bsdtar -xOf "$pkg" .PKGINFO) || die "cannot read $pkg"
+      name=$(awk -F' = ' '$1 == "pkgname" { print $2; exit }' <<<"$info")
       parch=$(awk -F' = ' '$1 == "arch" { print $2; exit }' <<<"$info")
       [[ $parch == "$arch" || $parch == any ]] || continue
-      kind=$(bsdtar -tf "$pkg" | classify | cut -f1) || die "cannot list $pkg"
+      list=$(bsdtar -tf "$pkg") || die "cannot list $pkg"
+      kind=$(classify <<<"$list" | cut -f1)
       if [[ $kind == kernel || $kind == dkms ]]; then
         echo "${pkg##*/} ($kind)"
+        found=0
+      elif grep -qxF -- "$name" <<<"$published"; then
+        echo "${pkg##*/} (published as a kernel or DKMS package)"
         found=0
       fi
     done
@@ -390,13 +410,22 @@ case $mode in
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
     curl -fsSL --retry 3 -o "$work/channel.files" "$PKGS_BASE/$channel/$arch/omarchy.files" || die "cannot download $channel/$arch/omarchy.files"
-    tar -tf "$work/channel.files" | awk -F/ 'NF > 1 && $1 ~ /-headers-/ { print $1 }' | sort -u
-    while IFS= read -r repo; do
-      [[ -n $repo ]] || continue
-      curl -fsSL --retry 3 -o "$work/$repo.db" "$(repo_url "$channel" "$repo")/$repo.db" || die "cannot download $repo.db from the $channel mirror"
-      tar -tf "$work/$repo.db" | awk -F/ 'NF > 1 { print $1 }' | sort -u |
-        grep -E "^($(awk -F'\t' -v r="$repo" '$2 == r { printf "%s%s", (n++ ? "|" : ""), $1 }' <<<"$REPOS"))-[0-9]" || true
-    done < <(cut -f2 <<<"$REPOS" | sort -u)
+    # Every read is checked: a fingerprint that silently lost a part would be
+    # remembered as built and hide that part's later updates.
+    entries=$(tar -tf "$work/channel.files") || die "cannot read $channel/$arch/omarchy.files"
+    kernels=$(awk -F/ 'NF > 1 && $1 ~ /-headers-/ { print $1 }' <<<"$entries" | sort -u)
+    [[ -n $kernels ]] || die "$channel/$arch publishes no headers package"
+    printf '%s\n' "$kernels"
+    while IFS=$'\t' read -r name repo; do
+      [[ -n $name ]] || continue
+      if [[ ! -f $work/$repo.db ]]; then
+        curl -fsSL --retry 3 -o "$work/$repo.db" "$(repo_url "$channel" "$repo")/$repo.db" || die "cannot download $repo.db from the $channel mirror"
+        tar -tf "$work/$repo.db" | awk -F/ 'NF > 1 { print $1 }' | sort -u >"$work/$repo.list" || die "cannot read $repo.db from the $channel mirror"
+      fi
+      found=$(grep -E "^${name//./\\.}-[0-9]" "$work/$repo.list" || true)
+      [[ -n $found ]] || die "$repo on the $channel mirror has no $name"
+      printf '%s\n' "$found"
+    done <<<"$REPOS"
     ;;
 
   plan)

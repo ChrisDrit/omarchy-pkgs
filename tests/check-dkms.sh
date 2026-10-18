@@ -241,6 +241,18 @@ if check --kernel "linux-omarchy-headers 7.2.8-8" >/dev/null; then fail "a leg f
 grep -q 'this plan has no pair for kernel linux-omarchy-headers 7.2.8-8' "$tmp/stderr" &&
   pass "a leg for a version the channel no longer has fails, not checks the new one" || fail "moved: $(cat "$tmp/stderr")"
 
+# A kernel built with clang (linux-aurora) needs clang, llvm and lld: DKMS
+# builds its modules with LLVM=1. Read from the installed build tree.
+mkdir -p "$tmp/clang-build" "$tmp/gcc-build"
+printf '%s\n' 'CONFIG_CC_VERSION_TEXT="clang version 18.1.8"' 'CONFIG_CC_IS_CLANG=y' 'CONFIG_LD_IS_LLD=y' >"$tmp/clang-build/.config"
+printf '%s\n' 'CONFIG_CC_IS_GCC=y' '# CONFIG_CC_IS_CLANG is not set' >"$tmp/gcc-build/.config"
+[[ $("$ROOT/bin/check-dkms" toolchain "$tmp/clang-build" 2>&1) == "clang llvm lld" ]] &&
+  pass "a kernel built with clang needs clang, llvm and lld" || fail "clang: $("$ROOT/bin/check-dkms" toolchain "$tmp/clang-build" 2>&1)"
+[[ -z $("$ROOT/bin/check-dkms" toolchain "$tmp/gcc-build" "$tmp/missing-build" 2>&1) ]] &&
+  pass "a kernel built with gcc, or one without a .config, needs nothing more" || fail "gcc: $("$ROOT/bin/check-dkms" toolchain "$tmp/gcc-build" 2>&1)"
+[[ $("$ROOT/bin/check-dkms" toolchain "$tmp/gcc-build" "$tmp/clang-build" 2>&1) == "clang llvm lld" ]] &&
+  pass "one kernel built with clang among several is enough" || fail "mixed"
+
 # run installs packages, so it must refuse to start without root. Checked only
 # when not root: as root it would really install them.
 if ((EUID != 0)); then

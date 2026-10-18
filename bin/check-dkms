@@ -38,6 +38,9 @@
 #       the pairs of one leg, at the versions the leg names.
 #   bin/check-dkms container <same options as run>
 #       Run it in a throwaway container of the right image (needs Docker).
+#   bin/check-dkms toolchain <kernel build tree>...
+#       Print the packages a DKMS build needs beyond base-devel for these
+#       kernels: "clang llvm lld" when one was built with clang, else nothing.
 set -euo pipefail
 
 ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -47,11 +50,29 @@ X86_64_IMAGE=${OMARCHY_DKMS_X86_64_IMAGE:-ghcr.io/archlinux/archlinux:base-devel
 AARCH64_IMAGE=${OMARCHY_DKMS_AARCH64_IMAGE:-ghcr.io/menci/archlinuxarm@sha256:3e1074c407fc1a57c2a2117af6920c96a7cc906fa6f1f2da8a4a7fd3aa2c2f4e}
 
 die() { echo "check-dkms: $*" >&2; exit 2; }
-usage() { sed -n '21,40p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '/^# Usage:/,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2; }
+
+# A kernel built with clang (linux-aurora) needs its modules built with clang:
+# DKMS reads CONFIG_CC_IS_CLANG from the build tree and passes LLVM=1 to make,
+# which runs clang, ld.lld and the llvm-* tools from PATH.
+toolchain() {
+  local tree
+  for tree in "$@"; do
+    if grep -qx 'CONFIG_CC_IS_CLANG=y' "$tree/.config" 2>/dev/null; then
+      echo "clang llvm lld"
+      return
+    fi
+  done
+}
 
 mode=${1:-}
 [[ -n $mode ]] || usage
 shift
+if [[ $mode == toolchain ]]; then
+  (($#)) || usage
+  toolchain "$@"
+  exit 0
+fi
 arch="" channel="" files_db="" local_dir="" since="" since_db="" only="" from_repos=0
 pair_kernel="" pair_module="" save_local=""
 repo_dbs=()
@@ -537,6 +558,25 @@ case $mode in
       echo "==> Installing $name ($kver)"
       pacman -U --noconfirm --needed "$FETCHED" >/dev/null || die "cannot install $name"
     done
+    # A kernel built with clang needs clang, lld and the llvm tools on PATH.
+    # Its headers package should depend on them; when it does not, a machine
+    # without them cannot build any module for that kernel, so say so.
+    llvm_kernels=() llvm_note=""
+    for kver in $(cut -f2 <<<"$PAIRS" | sort -u); do
+      [[ -z $(toolchain "/usr/lib/modules/$kver/build") ]] || llvm_kernels+=("$kver")
+    done
+    if ((${#llvm_kernels[@]})); then
+      missing=()
+      for tool in clang ld.lld llvm-ar llvm-nm llvm-objcopy; do
+        command -v "$tool" >/dev/null || missing+=("$tool")
+      done
+      if ((${#missing[@]})); then
+        echo "==> ${llvm_kernels[*]}: built with clang; installing clang, llvm and lld (missing: ${missing[*]})"
+        pacman -S --noconfirm --needed clang llvm lld >/dev/null || die "cannot install clang, llvm and lld"
+        llvm_note="the kernel's headers do not depend on clang, llvm and lld; the check installed them"
+      fi
+      echo "==> $(clang --version | head -n 1), for ${llvm_kernels[*]}"
+    fi
     # DKMS packages are unpacked, not installed: pacman would run DKMS's own
     # hook and build them against every kernel. The whole package, not just
     # /usr/src: broadcom-wl's build links a blob from /usr/lib/broadcom-wl-dkms.
@@ -575,6 +615,9 @@ case $mode in
           fi
           ;;
       esac
+      if [[ -n $llvm_note && " ${llvm_kernels[*]} " == *" $kver "* ]]; then
+        result+=" ($llvm_note)"
+      fi
       echo "    $result"
       results+=("| $dname | $module $version | $kname $kver | $result |")
     done <<<"$PAIRS"

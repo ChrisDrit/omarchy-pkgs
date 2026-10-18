@@ -9,12 +9,18 @@ name: DKMS check
 # It runs on its own:
 #   - for every pull request build, on the packages it built (dkms-pr.yml);
 #   - before every promotion, on what moves (promote.yml calls this);
-#   - for a change to the check itself (pull_request below).
+#   - for a change to the check itself (pull_request below);
+#   - daily, for the DKMS packages Omarchy installs from Arch (ci/dkms-packages
+#     repo=), which Arch updates on its own schedule: against edge's kernels,
+#     and only when one of those packages or a kernel has a version no green
+#     run has seen yet (bin/check-dkms fingerprint).
 # By hand, for a whole channel or what differs from another one:
 #   gh workflow run dkms-check.yml -R omacom/omarchy-pkgs -f channel=stable
 #   gh workflow run dkms-check.yml -R omacom/omarchy-pkgs -f channel=edge -f since=rc
 
 on:
+  schedule:
+    - cron: "37 5 * * *"
   workflow_dispatch:
     inputs:
       channel:
@@ -26,6 +32,10 @@ on:
         description: "Only what differs from this channel (empty: everything)"
         required: false
         default: ""
+      from_repos:
+        description: Only the DKMS packages from Arch's repositories, against every kernel
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       channel:
@@ -69,13 +79,41 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # The daily run builds only what no green run has built yet: the cache
+      # entry is the fingerprint of the versions it depends on.
+      - name: Fingerprint Arch's DKMS packages and edge's kernels
+        id: fingerprint
+        if: github.event_name == 'schedule'
+        run: |
+          print=$(bin/check-dkms fingerprint --arch "${{ matrix.arch }}" --channel edge)
+          printf '%s\n' "$print"
+          mkdir -p .dkms-seen
+          printf '%s\n' "$print" > .dkms-seen/fingerprint
+          echo "key=dkms-repos-${{ matrix.arch }}-$(sha256sum .dkms-seen/fingerprint | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Look for a green run with the same fingerprint
+        id: seen
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v4
+        with:
+          path: .dkms-seen
+          key: ${{ steps.fingerprint.outputs.key }}
+          lookup-only: true
       - name: Build DKMS modules against ${{ inputs.channel || 'edge' }} kernels
+        if: steps.seen.outputs.cache-hit != 'true'
         env:
           CHANNEL: ${{ inputs.channel || 'edge' }}
           SINCE: ${{ inputs.since }}
           PACKAGES: ${{ inputs.packages }}
+          FROM_REPOS: ${{ github.event_name == 'schedule' || inputs.from_repos == true }}
         run: |
           args=(--arch "${{ matrix.arch }}" --channel "$CHANNEL")
           [[ -z $SINCE ]] || args+=(--since "$SINCE")
           [[ -z $PACKAGES ]] || args+=(--packages "$PACKAGES")
+          [[ $FROM_REPOS != true ]] || args+=(--from-repos)
           bin/check-dkms container "${args[@]}"
+      - name: Remember this fingerprint as built
+        if: github.event_name == 'schedule' && steps.seen.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .dkms-seen
+          key: ${{ steps.fingerprint.outputs.key }}

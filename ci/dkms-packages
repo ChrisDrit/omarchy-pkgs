@@ -6,7 +6,13 @@
 # kernels= limits a module to the kernel headers packages it is installed
 # with: the Apple modules only ever run on the Asahi kernel, linux-aurora.
 #
-# package                              architectures [kernels=<headers>,...]
+# repo=<name> marks a DKMS package Omarchy installs from an Arch (aarch64:
+# Arch Linux ARM) repository instead of building it here. check-dkms reads it
+# from the channel's mirror and builds it whenever a kernel changes, and the
+# daily run builds it when the mirror updates it. A repository that publishes
+# the same name itself is what pacman installs, so its copy is checked instead.
+#
+# package                              architectures [kernels=<headers>,...] [repo=<repo>]
 brcmfmac-awdl-dkms                     aarch64 kernels=linux-aurora-headers
 intel-ipu7-camera                      x86_64
 macbook12-spi-driver-dkms              x86_64
@@ -18,3 +24,11 @@ thinkpad-t14-amd-touchpad-dkms         x86_64
 tuxedo-drivers-nocompatcheck-dkms      x86_64
 xpadneo-dkms                           x86_64 aarch64
 yt6801-dkms                            x86_64
+
+# From Arch's repositories:
+#   nvidia-open-dkms   install/hardware/nvidia.sh in omacom/omarchy (aarch64 builds its own, above)
+#   v4l2loopback-dkms  intel-ipu7-camera's dependency, and the Cam Link 4K fix
+#   broadcom-wl-dkms   install/hardware/fix-bcm43xx.sh
+nvidia-open-dkms                       x86_64 repo=extra
+v4l2loopback-dkms                      x86_64 aarch64 repo=extra
+broadcom-wl-dkms                       x86_64 repo=extra

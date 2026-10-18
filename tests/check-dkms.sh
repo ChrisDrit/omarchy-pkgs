@@ -121,6 +121,69 @@ grep -qP '^pair\tlinux-aurora-headers 7.1.12-2-ARCH\tomarchy-ane-dkms ' <<<"$pla
   pass "a module limited to some kernels is only built against those" || fail "scope: $plan"
 printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' >"$tmp/registry"
 
+# repo= packages come from an Arch repository's files database. They pair
+# whenever a kernel changes and never count as a change of their own.
+entry extra v4l2loopback-dkms 0.15.4-2 usr/src/v4l2loopback-0.15.4/dkms.conf
+entry extra hyprland-git 1-1 usr/bin/Hyprland
+channel extra
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' 'v4l2loopback-dkms x86_64 repo=extra' >"$tmp/registry"
+repo=(--repo-files-db "extra=$tmp/extra.files")
+plan=$(check "${repo[@]}") || fail "a repo= package plans: $(cat "$tmp/stderr")"
+grep -qP '^dkms\tv4l2loopback-dkms\t0.15.4-2\tv4l2loopback-0.15.4$' <<<"$plan" && ! grep -q hyprland-git <<<"$plan" &&
+  grep -qP '^pair\tlinux-omarchy-headers 7.2.8-9-omarchy\tv4l2loopback-dkms v4l2loopback-0.15.4$' <<<"$plan" &&
+  pass "a repo= package is read from its repository and checked against every kernel" || fail "repo: $plan"
+! grep -q 'v4l2loopback-dkms is listed for x86_64 but not published here' "$tmp/stderr" &&
+  pass "a repo= package is not reported as missing from this repository" || fail "repo note: $(cat "$tmp/stderr")"
+plan=$(check "${repo[@]}" --since-db "$tmp/edge.files")
+grep -qx 'nothing to check' <<<"$plan" &&
+  pass "a promotion that moves no kernel does not check repo= packages" || fail "repo unchanged: $plan"
+plan=$(check "${repo[@]}" --since-db "$tmp/rc.files")
+grep -qP '^pair\tlinux-omarchy-headers 7.2.8-9-omarchy\tv4l2loopback-dkms ' <<<"$plan" &&
+  pass "a promotion that moves a kernel checks it against repo= packages" || fail "repo kernel: $plan"
+plan=$(check "${repo[@]}" --local "$tmp/local-kernel")
+grep -qP '^pair\tlinux-omarchy-headers 7.2.9-1-omarchy\tv4l2loopback-dkms ' <<<"$plan" &&
+  pass "a pull request's kernel is checked against repo= packages" || fail "repo local kernel: $plan"
+plan=$(check --local "$tmp/local") || fail "a pull request without a kernel must not need repository databases: $(cat "$tmp/stderr")"
+! grep -q v4l2loopback <<<"$plan" &&
+  pass "a pull request without a kernel neither downloads nor checks repo= packages" || fail "repo not needed: $plan"
+plan=$(check "${repo[@]}" --from-repos)
+[[ $(grep -c '^pair' <<<"$plan") == 1 ]] && grep -q 'v4l2loopback-dkms' <<<"$plan" &&
+  pass "--from-repos checks only repo= packages, against every kernel" || fail "from-repos: $plan"
+if check >/dev/null; then fail "a whole-channel plan without the repository's files database must fail"; fi
+grep -q "no files database given for v4l2loopback-dkms's repository, extra" "$tmp/stderr" &&
+  pass "a missing repository database is an error" || fail "no repo db: $(cat "$tmp/stderr")"
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' 'nosuch-dkms x86_64 repo=extra' >"$tmp/registry"
+if check "${repo[@]}" >/dev/null; then fail "a repo= package its repository lacks must fail"; fi
+grep -q 'nosuch-dkms is listed as coming from extra, but extra has no DKMS package of that name' "$tmp/stderr" &&
+  pass "a repo= package missing from its repository is an error" || fail "repo missing: $(cat "$tmp/stderr")"
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' 'v4l2loopback-dkms x86_64 repo=extra' >"$tmp/registry"
+package "$tmp/local-own" v4l2loopback-dkms 0.15.5-1 x86_64 usr/src/v4l2loopback-0.15.5/dkms.conf
+package "$tmp/local-own" linux-omarchy-headers 7.2.9-1 x86_64 usr/lib/modules/7.2.9-1-omarchy/build/Makefile
+plan=$(check "${repo[@]}" --local "$tmp/local-own")
+grep -qP '^dkms\tv4l2loopback-dkms\t0.15.5-1\t' <<<"$plan" && [[ $(grep -c $'^dkms\tv4l2loopback-dkms' <<<"$plan") == 1 ]] &&
+  grep -q 'v4l2loopback-dkms is built here too' "$tmp/stderr" &&
+  pass "this repository's own copy of a repo= package is the one checked" || fail "own copy: $plan $(cat "$tmp/stderr")"
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' >"$tmp/registry"
+
+# A pull request that adds a DKMS recipe is checked before it publishes, even
+# though master's registry does not list it yet.
+package "$tmp/local-new" hid-nintendo2-dkms 0.1.0-1 x86_64 usr/src/hid-nintendo2-0.1.0/dkms.conf
+plan=$(check --local "$tmp/local-new") || fail "an unlisted fresh DKMS package plans: $(cat "$tmp/stderr")"
+[[ $(grep -c '^pair' <<<"$plan") == 1 ]] && grep -qP '^pair\tlinux-omarchy-headers 7.2.8-9-omarchy\thid-nintendo2-dkms hid-nintendo2-0.1.0$' <<<"$plan" &&
+  grep -q 'hid-nintendo2-dkms is not in ci/dkms-packages yet' "$tmp/stderr" &&
+  pass "an unlisted fresh DKMS package is checked against every kernel" || fail "new recipe: $plan $(cat "$tmp/stderr")"
+
+# needs: whether a build holds anything to check, decided before any container.
+package "$tmp/local-plain" hyprland 0.56.2-5 x86_64 usr/bin/Hyprland
+"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local-plain" >/dev/null &&
+  fail "a build without kernels or DKMS packages needs no check" || pass "a build without kernels or DKMS packages needs no check"
+"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local" | grep -q 'tuxedo-drivers-nocompatcheck-dkms-4.22.1-3-x86_64.pkg.tar.zst (dkms)' &&
+  pass "a build with a DKMS package needs a check, and says which" || fail "needs dkms"
+"$ROOT/bin/check-dkms" needs --arch x86_64 --local "$tmp/local-kernel" | grep -q '(kernel)' &&
+  pass "a build with a kernel needs a check" || fail "needs kernel"
+"$ROOT/bin/check-dkms" needs --arch aarch64 --local "$tmp/local-kernel" >/dev/null &&
+  fail "another architecture's kernel needs no check" || pass "another architecture's kernel needs no check"
+
 # run installs packages, so it must refuse to start without root. Checked only
 # when not root: as root it would really install them.
 if ((EUID != 0)); then

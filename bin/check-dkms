@@ -33,11 +33,18 @@
 #   bin/check-dkms run --arch <arch> --channel <channel> [--local <dir>] [--since <channel>]
 #                      [--packages "<name|pkgbase> ..."] [--from-repos]
 #                      [--kernel "<name|pkgbase> [version]"] [--module "<name> [version]"]
+#                      [--results <dir>]
 #       Run the check, as root, in a disposable Arch (x86_64) or Arch Linux ARM
 #       (aarch64) system: it installs packages. --kernel and --module keep only
 #       the pairs of one leg, at the versions the leg names.
+#       --results <dir> keeps each pair's verdict in <dir>/pairs.tsv.
 #   bin/check-dkms container <same options as run>
 #       Run it in a throwaway container of the right image (needs Docker).
+#   bin/check-dkms judge --arch <arch> < <raw results>
+#       Judge run's raw results ("<kernel> <kver> <package> <tree> <built|
+#       excluded|failed> <note>" per line) against ci/dkms-packages: a
+#       known-broken package that fails is expected, one that builds fails.
+#       Prints each pair with its verdict and text; exits 1 on a failure.
 #   bin/check-dkms toolchain <kernel build tree>...
 #       Print the packages a DKMS build needs beyond base-devel for these
 #       kernels: "clang llvm lld" when one was built with clang, else nothing.
@@ -74,7 +81,7 @@ if [[ $mode == toolchain ]]; then
   exit 0
 fi
 arch="" channel="" files_db="" local_dir="" since="" since_db="" only="" from_repos=0
-pair_kernel="" pair_module="" save_local=""
+pair_kernel="" pair_module="" save_local="" results_dir=""
 repo_dbs=()
 while (($#)); do
   case $1 in
@@ -90,6 +97,7 @@ while (($#)); do
     --kernel) pair_kernel=${2:?--kernel needs a value}; shift 2 ;;
     --module) pair_module=${2:?--module needs a value}; shift 2 ;;
     --save-local) save_local=${2:?--save-local needs a value}; shift 2 ;;
+    --results) results_dir=${2:?--results needs a directory}; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -104,23 +112,72 @@ if [[ -n $local_dir ]]; then
   [[ -d $local_dir ]] || die "--local $local_dir is not a directory"
 fi
 
+# The registry's entries for this architecture, one line each:
+#   <package> <kernels=, or -> <repo=, or -> <known-broken= reason, or ->
+# A reason is quoted and may hold spaces, so it is taken out of the line
+# before the fields are read. A field the registry does not know is an error:
+# a misspelt mark must not silently stop applying.
+read_registry() {
+  awk -v a="$arch" '
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      why = "-"
+      if (match($0, /known-broken="[^"]*"/)) {
+        why = substr($0, RSTART + 14, RLENGTH - 15)
+        $0 = substr($0, 1, RSTART - 1) " " substr($0, RSTART + RLENGTH)
+        if (why == "") { print "check-dkms: " FILENAME ":" FNR ": known-broken needs a reason" > "/dev/stderr"; bad = 1 }
+      }
+      ok = 0; k = "-"; r = "-"
+      for (i = 2; i <= NF; i++) {
+        if ($i == "x86_64" || $i == "aarch64") { if ($i == a) ok = 1 }
+        else if ($i ~ /^kernels=./) k = substr($i, 9)
+        else if ($i ~ /^repo=./) r = substr($i, 6)
+        else { print "check-dkms: " FILENAME ":" FNR ": unknown field " $i > "/dev/stderr"; bad = 1 }
+      }
+      if (ok) print $1 "\t" k "\t" r "\t" why
+    }
+    END { exit bad }' "$REGISTRY"
+}
+ENTRIES=$(read_registry) || die "$REGISTRY has errors"
 # The DKMS packages ci/dkms-packages lists for this architecture, and the
 # kernels each is limited to ("<package> <headers>,..."; none means every one,
 # and "!<headers>" every one but those).
-LISTED=$(awk -v a="$arch" '!/^[[:space:]]*(#|$)/ { for (i = 2; i <= NF; i++) if ($i == a) print $1 }' "$REGISTRY")
-SCOPES=$(awk -v a="$arch" '!/^[[:space:]]*(#|$)/ {
-    ok = 0; k = ""
-    for (i = 2; i <= NF; i++) { if ($i == a) ok = 1; if ($i ~ /^kernels=/) k = substr($i, 9) }
-    if (ok && k != "") print $1 "\t" k
-  }' "$REGISTRY")
+LISTED=$(cut -f1 <<<"$ENTRIES" | sed '/^$/d')
+SCOPES=$(awk -F'\t' '$2 != "-" { print $1 "\t" $2 }' <<<"$ENTRIES")
 is_listed() { grep -qxF -- "$1" <<<"$LISTED"; }
 # The listed packages that come from an Arch repository: "<package> <repo>".
-REPOS=$(awk -v a="$arch" '!/^[[:space:]]*(#|$)/ {
-    ok = 0; r = ""
-    for (i = 2; i <= NF; i++) { if ($i == a) ok = 1; if ($i ~ /^repo=/) r = substr($i, 6) }
-    if (ok && r != "") print $1 "\t" r
-  }' "$REGISTRY")
+REPOS=$(awk -F'\t' '$3 != "-" { print $1 "\t" $3 }' <<<"$ENTRIES")
 from_repo() { awk -F'\t' -v n="$1" '$1 == n { f = 1 } END { exit !f }' <<<"$REPOS"; }
+# The listed packages known not to build, with the reason: "<package> <why>".
+# The check expects them to fail, and fails when one builds, so the mark
+# comes off as soon as it is wrong.
+BROKEN=$(awk -F'\t' '$4 != "-" { print $1 "\t" $4 }' <<<"$ENTRIES")
+
+# Raw results on stdin ("<kernel> <kver> <package> <tree> <built|excluded|
+# failed> <note>") to verdicts: the same fields with the outcome replaced by
+# built, excluded, failed, known-broken or fixed, and the note by the text a
+# person reads. Exits 1 when a pair failed or a known-broken one built.
+judge() {
+  awk -F'\t' -v OFS='\t' '
+    FNR == 1 { file++ }
+    file == 1 { if ($1 != "") why[$1] = $2; next }
+    $1 == "" { next }
+    {
+      verdict = $5
+      if ($5 == "built") text = "built"
+      else if ($5 == "excluded") text = "excluded (BUILD_EXCLUSIVE)"
+      else if ($5 == "failed") text = "FAILED"
+      else { print "check-dkms: unknown outcome " $5 " for " $3 > "/dev/stderr"; exit 2 }
+      if ($3 in why) {
+        if ($5 == "failed") { verdict = "known-broken"; text = "known broken: " why[$3] }
+        else if ($5 == "built") { verdict = "fixed"; text = "FAILED: builds now; remove its known-broken mark from ci/dkms-packages (" why[$3] ")" }
+      }
+      if (verdict == "failed" || verdict == "fixed") failed = 1
+      if ($6 != "" && $6 != "-") text = text " (" $6 ")"
+      print $1, $2, $3, $4, verdict, text
+    }
+    END { exit failed }' <(printf '%s\n' "$BROKEN") -
+}
 # The repo= packages this plan really takes from Arch: those this repository
 # does not build itself. Set by plan_for; empty when none were needed.
 ARCH_SOURCED=""
@@ -603,8 +660,7 @@ case $mode in
         --exclude .INSTALL --exclude .CHANGELOG || die "cannot unpack $name"
     done
 
-    results=()
-    failed=0
+    raw=""
     while IFS=$'\t' read -r kname kver dname tree; do
       # The module and version the way Arch's DKMS hook reads them: the source
       # directory's name, split at its last dash.
@@ -615,10 +671,9 @@ case $mode in
       timeout 3600 dkms build --force -m "$module" -v "$version" -k "$kver" >"$work/build.log" 2>&1 || status=$?
       case $status in
         0) result=built ;;
-        77) result="excluded (BUILD_EXCLUSIVE)" ;;
+        77) result=excluded ;;
         *)
-          result=FAILED
-          failed=1
+          result=failed
           tail -n 40 "$work/build.log" || true
           log=/var/lib/dkms/$module/$version/build/make.log
           if [[ -f $log ]]; then
@@ -631,21 +686,32 @@ case $mode in
           fi
           ;;
       esac
+      note=-
       if [[ -n $llvm_note && " ${llvm_kernels[*]} " == *" $kver "* ]]; then
-        result+=" ($llvm_note)"
+        note=$llvm_note
       fi
       echo "    $result"
-      results+=("| $dname | $module $version | $kname $kver | $result |")
+      raw+=$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$kname" "$kver" "$dname" "$tree" "$result" "$note")$'\n'
     done <<<"$PAIRS"
 
+    failed=0
+    judged=$(judge <<<"$raw") || failed=$?
+    ((failed < 2)) || die "cannot judge the results"
+    if [[ -n $results_dir ]]; then
+      printf '%s\n' "$judged" >"$results_dir/pairs.tsv" || die "cannot write $results_dir/pairs.tsv"
+    fi
     {
       echo "### DKMS on $channel/$arch${since:+, changes since $since}${local_dir:+, with this build}"
       echo
       echo "| Package | Module | Kernel | Result |"
       echo "|---|---|---|---|"
-      printf '%s\n' "${results[@]}"
+      awk -F'\t' '{ m = $4; sub(/-[^-]*$/, "", m); v = substr($4, length(m) + 2); print "| " $3 " | " m " " v " | " $1 " " $2 " | " $6 " |" }' <<<"$judged"
     } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
     exit "$failed"
+    ;;
+
+  judge)
+    judge
     ;;
 
   *) usage ;;

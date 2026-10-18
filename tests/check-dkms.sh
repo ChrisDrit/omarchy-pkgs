@@ -264,6 +264,43 @@ if check --kernel "linux-omarchy-headers 7.2.8-8" >/dev/null; then fail "a leg f
 grep -q 'this plan has no pair for kernel linux-omarchy-headers 7.2.8-8' "$tmp/stderr" &&
   pass "a leg for a version the channel no longer has fails, not checks the new one" || fail "moved: $(cat "$tmp/stderr")"
 
+# known-broken="<why>": its failures are expected, and a pair that builds
+# fails the check so the mark comes off. The reason may hold spaces and words
+# like an architecture, which must not be read as fields.
+printf '%s\n' 'macbook12-spi-driver-dkms x86_64 known-broken="no build since Linux 6.10 on x86_64 or aarch64"' \
+  'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' >"$tmp/registry"
+judge() { "$ROOT/bin/check-dkms" judge --arch "${ARCH:-x86_64}" 2>"$tmp/stderr"; }
+raw() { printf 'linux-omarchy-headers\t7.2.8-9-omarchy\t%s\t%s\t%s\t-\n' "$@"; }
+verdicts() { cut -f5 <<<"$1" | tr '\n' ' '; }
+out=$(raw macbook12-spi-driver-dkms macbook12-spi-driver-0+git.315 failed tuxedo-drivers-nocompatcheck-dkms tuxedo-drivers-v4.22.1 built | judge) &&
+  [[ $(verdicts "$out") == "known-broken built " ]] && grep -qF 'known broken: no build since Linux 6.10 on x86_64 or aarch64' <<<"$out" &&
+  pass "a known-broken package that fails is reported as known broken, and passes" || fail "known broken: $out $(cat "$tmp/stderr")"
+if out=$(raw macbook12-spi-driver-dkms macbook12-spi-driver-0+git.315 built | judge); then
+  fail "a known-broken package that builds must fail the check: $out"
+fi
+[[ $(verdicts "$out") == "fixed " ]] && grep -qF 'builds now; remove its known-broken mark' <<<"$out" &&
+  pass "a known-broken package that builds fails, so the mark is removed" || fail "fixed: $out"
+out=$(raw macbook12-spi-driver-dkms macbook12-spi-driver-0+git.315 excluded | judge) && [[ $(verdicts "$out") == "excluded " ]] &&
+  pass "a known-broken package that a kernel excludes is neither broken nor fixed" || fail "excluded: $out"
+if out=$(raw tuxedo-drivers-nocompatcheck-dkms tuxedo-drivers-v4.22.1 failed | judge); then fail "an unmarked failure must fail: $out"; fi
+[[ $(verdicts "$out") == "failed " ]] && pass "a package without the mark that fails, fails" || fail "failed: $out"
+plan=$(ARCH=aarch64 "$ROOT/bin/check-dkms" plan --arch aarch64 --files-db "$tmp/edge.files" 2>&1 || true)
+! grep -q 'macbook12-spi-driver-dkms is listed for aarch64' <<<"$plan" &&
+  pass "an architecture named inside a reason does not list the package for it" || fail "reason fields: $plan"
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64 known_broken="typo"' >"$tmp/registry"
+if check >/dev/null; then fail "an unknown registry field must fail"; fi
+grep -q 'unknown field known_broken="typo"' "$tmp/stderr" &&
+  pass "a misspelt registry field is an error, not ignored" || fail "unknown field: $(cat "$tmp/stderr")"
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64 known-broken=""' >"$tmp/registry"
+if check >/dev/null; then fail "a known-broken mark without a reason must fail"; fi
+grep -q 'known-broken needs a reason' "$tmp/stderr" &&
+  pass "a known-broken mark needs a reason" || fail "no reason: $(cat "$tmp/stderr")"
+# The registry itself: macbook12-spi-driver-dkms is marked.
+out=$(raw macbook12-spi-driver-dkms macbook12-spi-driver-0+git.315 failed | OMARCHY_DKMS_REGISTRY="$ROOT/ci/dkms-packages" judge) &&
+  [[ $(verdicts "$out") == "known-broken " ]] &&
+  pass "ci/dkms-packages marks macbook12-spi-driver-dkms known broken" || fail "registry mark: $out $(cat "$tmp/stderr")"
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' >"$tmp/registry"
+
 # A kernel built with clang (linux-aurora) needs clang, llvm and lld: DKMS
 # builds its modules with LLVM=1. Read from the installed build tree.
 mkdir -p "$tmp/clang-build" "$tmp/gcc-build"

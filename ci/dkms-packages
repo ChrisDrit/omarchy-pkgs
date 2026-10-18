@@ -14,10 +14,15 @@
 # daily run builds it when the mirror updates it. A repository that publishes
 # the same name itself is what pacman installs, so its copy is checked instead.
 #
-# package                              architectures [kernels=[!]<headers>,...] [repo=<repo>]
+# known-broken="<why>" marks a package that does not build and that we keep
+# shipping for now. Its failures are reported as known broken, not as
+# failures; a pair that builds fails the check, so the mark comes off as soon
+# as it is wrong.
+#
+# package                              architectures [kernels=[!]<headers>,...] [repo=<repo>] [known-broken="<why>"]
 brcmfmac-awdl-dkms                     aarch64 kernels=linux-aurora-headers
 intel-ipu7-camera                      x86_64
-macbook12-spi-driver-dkms              x86_64
+macbook12-spi-driver-dkms              x86_64 known-broken="does not build since Linux 6.10 and upstream stopped in 2024; the in-tree applespi drives the keyboard and touchpad"
 macbook8-spi-pxa2xx-nodma-dkms         x86_64
 nvidia-580xx-dkms                      x86_64
 nvidia-open-dkms                       aarch64 kernels=!linux-aurora-headers

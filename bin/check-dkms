@@ -562,8 +562,12 @@ case $mode in
           tail -n 40 "$work/build.log" || true
           log=/var/lib/dkms/$module/$version/build/make.log
           if [[ -f $log ]]; then
-            echo "--- $log"
-            grep -m 20 -E 'error|Error' "$log" || true
+            # The compiler's errors, then the end of the log: a link or
+            # modpost failure names no "error" until make gives up.
+            echo "--- $log (errors)"
+            grep -m 20 -iE 'error|undefined|no rule|fatal' "$log" || true
+            echo "--- $log (end)"
+            tail -n 25 "$log" || true
           fi
           ;;
       esac

@@ -247,6 +247,15 @@ matrix --local "$tmp/local-mixed" --save-local "$tmp/saved" >/dev/null &&
 [[ $(ls "$tmp/saved" | tr '\n' ' ') == "linux-omarchy-headers-7.2.9-1-x86_64.pkg.tar.zst yt6801-dkms-1.0.34-2-aarch64.pkg.tar.zst " ]] &&
   pass "--save-local keeps each architecture's kernels and DKMS packages, nothing else" || fail "saved: $(ls "$tmp/saved")"
 
+# --all: every pair of the channel, with a build's packages in place of the
+# published ones; a build that ships nothing relevant still checks them all.
+plan=$(check --local "$tmp/local" --all) || fail "all: $(cat "$tmp/stderr")"
+[[ $(grep -c '^pair' <<<"$plan") == 3 ]] && grep -qP '^dkms\ttuxedo-drivers-nocompatcheck-dkms\t4.22.1-3\t' <<<"$plan" &&
+  pass "--all checks every pair, the build's package in place of the published one" || fail "all: $plan"
+legs=$(matrix --local "$tmp/local-plain" --all)
+jq -e 'length == 2' <<<"$legs" >/dev/null &&
+  pass "--all gives every leg even for a build without kernels or DKMS packages" || fail "all plain: $legs $(cat "$tmp/stderr")"
+
 # One leg: --kernel (headers name or pkgbase) and --module keep its pairs only.
 plan=$(check --kernel linux-omarchy-headers --module intel-ipu7-camera) || fail "leg: $(cat "$tmp/stderr")"
 [[ $(grep -c '^pair' <<<"$plan") == 2 ]] && ! grep -q $'^pair\t.*tuxedo' <<<"$plan" &&
@@ -300,6 +309,89 @@ out=$(raw macbook12-spi-driver-dkms macbook12-spi-driver-0+git.315 failed | OMAR
   [[ $(verdicts "$out") == "known-broken " ]] &&
   pass "ci/dkms-packages marks macbook12-spi-driver-dkms known broken" || fail "registry mark: $out $(cat "$tmp/stderr")"
 printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' >"$tmp/registry"
+
+# container: the leg's outcome is decided out here, from run's exit status
+# and the verdicts it leaves in /results. docker is a stub that writes
+# $FAKE_PAIRS there, prints a workflow command, and exits $FAKE_STATUS.
+mkdir -p "$tmp/dockerbin"
+cat >"$tmp/dockerbin/docker" <<'DOCKER'
+#!/bin/bash
+results=""
+while (($#)); do
+  if [[ $1 == -v && $2 == *:/results ]]; then results=${2%:/results}; fi
+  shift
+done
+[[ -z ${FAKE_PAIRS:-} ]] || cp "$FAKE_PAIRS" "$results/pairs.tsv"
+echo "::error::printed by the pull request's Makefile"
+exit "$FAKE_STATUS"
+DOCKER
+chmod +x "$tmp/dockerbin/docker"
+leg() { # leg <status> <verdict>...: run container with a stub run; sets $out and $leg_status
+  local v
+  : >"$tmp/pairs.tsv"
+  for v in "${@:2}"; do
+    printf 'linux-omarchy-headers\t7.2.8-9-omarchy\tintel-ipu7-camera\t%s-1.0.6\t%s\t%s\n' "${v%%:*}" "${v#*:}" \
+      "$(case ${v#*:} in built) echo built ;; excluded) echo 'excluded (BUILD_EXCLUSIVE)' ;; known-broken) echo 'known broken: why' ;; *) echo FAILED ;; esac)" >>"$tmp/pairs.tsv"
+  done
+  leg_status=0
+  out=$(PATH="$tmp/dockerbin:$PATH" FAKE_STATUS=$1 FAKE_PAIRS=$([[ $# -gt 1 ]] && echo "$tmp/pairs.tsv") GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="" \
+    "$ROOT/bin/check-dkms" container --arch x86_64 --channel edge --kernel "linux-omarchy 7.2.8-9" --module "intel-ipu7-camera 1.0.6-3" \
+    --result "$tmp/result.json" 2>&1) || leg_status=$?
+}
+outcome() { jq -r .outcome "$tmp/result.json"; }
+leg 0 ipu7:built
+((leg_status == 0)) && [[ $(outcome) == passed ]] && jq -e '.kernel == "linux-omarchy 7.2.8-9" and .module == "intel-ipu7-camera 1.0.6-3" and .detail == ""' "$tmp/result.json" >/dev/null &&
+  pass "a leg whose pairs built passed, named as the matrix names it" || fail "passed: $out $(cat "$tmp/result.json")"
+leg 0 ipu7:built vision:excluded
+((leg_status == 0)) && [[ $(outcome) == passed ]] && jq -e '.detail == "ipu7-1.0.6: built; vision-1.0.6: excluded (BUILD_EXCLUSIVE)"' "$tmp/result.json" >/dev/null &&
+  pass "a leg with several trees passes on its worst one and names each" || fail "trees: $(cat "$tmp/result.json")"
+leg 0 ipu7:known-broken
+((leg_status == 0)) && [[ $(outcome) == known-broken ]] &&
+  pass "a known-broken leg passes, reported as known broken" || fail "known broken: $(cat "$tmp/result.json")"
+leg 1 ipu7:fixed
+((leg_status == 1)) && [[ $(outcome) == fixed ]] &&
+  pass "a known-broken leg that builds fails" || fail "fixed: $(cat "$tmp/result.json")"
+leg 1 ipu7:failed
+((leg_status == 1)) && [[ $(outcome) == failed ]] && pass "a failed leg fails" || fail "failed: $(cat "$tmp/result.json")"
+leg 2
+((leg_status == 1)) && [[ $(outcome) == error ]] && grep -q 'exit status 2' "$tmp/result.json" &&
+  pass "a run that stopped before any verdict is an error, not a pass" || fail "stopped: $(cat "$tmp/result.json")"
+leg 0 ipu7:failed
+((leg_status == 1)) && [[ $(outcome) == error ]] &&
+  pass "an exit status that disagrees with the verdicts is an error" || fail "disagree: $(cat "$tmp/result.json")"
+token=$(sed -n 's/^::stop-commands::\([0-9a-f]\{32\}\)$/\1/p' <<<"$out")
+[[ -n $token ]] && sed -n "/^::stop-commands::$token$/,/^::$token::$/p" <<<"$out" | grep -q '^::error::printed by' &&
+  pass "nothing the container prints acts as a workflow command" || fail "stop-commands: $out"
+
+# report: one verdict for a run, from its legs and their results.
+mkdir -p "$tmp/report"
+printf '%s\n' '[{"arch":"x86_64","kernel":"linux-omarchy 7.2.8-9","module":"tuxedo-drivers-nocompatcheck-dkms 4.22.1-3"},' \
+  '{"arch":"x86_64","kernel":"linux-omarchy 7.2.8-9","module":"macbook12-spi-driver-dkms 0+git.315-2"},' \
+  '{"arch":"aarch64","kernel":"linux-aurora 7.1.12.aurora7-2","module":"xpadneo-dkms 0.10.4-1.1"}]' >"$tmp/legs.json"
+jq -n '{arch:"x86_64",kernel:"linux-omarchy 7.2.8-9",module:"tuxedo-drivers-nocompatcheck-dkms 4.22.1-3",outcome:"passed",detail:""}' >"$tmp/report/1.json"
+jq -n '{arch:"x86_64",kernel:"linux-omarchy 7.2.8-9",module:"macbook12-spi-driver-dkms 0+git.315-2",outcome:"known-broken",detail:"known broken: why"}' >"$tmp/report/2.json"
+report() { "$ROOT/bin/check-dkms" report --legs "$tmp/legs.json" --results "$tmp/report" --url https://example.invalid/run --channel edge "$@" 2>"$tmp/stderr"; }
+out=$(report --plan success) || fail "report: $(cat "$tmp/stderr")"
+jq -e '.conclusion == "failure" and .title == "1/3 passed, 1 known broken, 1 failed"' <<<"$out" >/dev/null &&
+  jq -r .summary <<<"$out" | grep -qF '| no result | aarch64 | linux-aurora 7.1.12.aurora7-2 | xpadneo-dkms 0.10.4-1.1 | the leg left no result |' &&
+  pass "a leg without a result fails the run, and the title counts passed, known broken and failed" || fail "report: $out"
+jq -n '{arch:"aarch64",kernel:"linux-aurora 7.1.12.aurora7-2",module:"xpadneo-dkms 0.10.4-1.1",outcome:"passed",detail:""}' >"$tmp/report/3.json"
+out=$(report --plan success)
+jq -e '.conclusion == "success" and .title == "2/3 passed, 1 known broken"' <<<"$out" >/dev/null &&
+  jq -r .summary <<<"$out" | sed -n '1p' | grep -qF '**2/3 passed, 1 known broken** on edge.' &&
+  pass "known broken legs do not fail the run" || fail "known broken run: $out"
+out=$(report --plan failure)
+jq -e '.conclusion == "failure" and .title == "The DKMS plan did not finish"' <<<"$out" >/dev/null &&
+  pass "a plan that failed fails the run" || fail "plan failed: $out"
+echo '[]' >"$tmp/no-legs.json"
+out=$("$ROOT/bin/check-dkms" report --legs "$tmp/no-legs.json" --results "$tmp/report" --plan success --note "This build ships no kernel or DKMS package.")
+jq -e '.conclusion == "success" and .title == "Nothing to check" and (.summary | startswith("This build ships no kernel or DKMS package."))' <<<"$out" >/dev/null &&
+  pass "a run without legs has nothing to check, and says why" || fail "no legs: $out"
+printf '%s\n' '[{"arch":"x86_64","kernel":"linux-omarchy 7.2.8-9","module":"evil|<img src=x>[a](https://x)`b`"}]' >"$tmp/evil.json"
+out=$("$ROOT/bin/check-dkms" report --legs "$tmp/evil.json" --results "$tmp/report" --plan success)
+row=$(jq -r .summary <<<"$out" | tail -n 1)
+[[ $(tr -cd '|' <<<"$row" | wc -c) == 6 && $row != *'<'* && $row != *'['* && $row != *'`'* ]] &&
+  pass "names from package metadata cannot add cells, HTML or links to the summary" || fail "escape: $row"
 
 # A kernel built with clang (linux-aurora) needs clang, llvm and lld: DKMS
 # builds its modules with LLVM=1. Read from the installed build tree.

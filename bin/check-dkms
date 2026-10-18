@@ -24,22 +24,31 @@
 #                       [--repo-files-db <repo>=<repo.files> ...] [--from-repos]
 #       Print the kernels, the DKMS packages and the pairs a run would build.
 #   bin/check-dkms matrix --arch <arch> [--channel <channel> | --files-db <omarchy.files>]
-#                         [the options of run or plan] [--save-local <dir>]
+#                         [the options of run or plan] [--save-local <dir>] [--all]
 #       Print the run's legs as a JSON array for a CI matrix, [] for none: one
 #       {"arch", "kernel": "<pkgbase> <version>", "module": "<name> <version>"}
 #       per kernel and DKMS package it builds. Runs on the host (curl and
 #       bsdtar). --save-local copies --local's kernels and DKMS packages, all
-#       the legs need, into <dir>.
+#       the legs need, into <dir>. --all keeps every pair of the channel, not
+#       only those that touch --local's packages, which stand in for theirs.
 #   bin/check-dkms run --arch <arch> --channel <channel> [--local <dir>] [--since <channel>]
 #                      [--packages "<name|pkgbase> ..."] [--from-repos]
 #                      [--kernel "<name|pkgbase> [version]"] [--module "<name> [version]"]
-#                      [--results <dir>]
+#                      [--results <dir>] [--all]
 #       Run the check, as root, in a disposable Arch (x86_64) or Arch Linux ARM
 #       (aarch64) system: it installs packages. --kernel and --module keep only
 #       the pairs of one leg, at the versions the leg names.
 #       --results <dir> keeps each pair's verdict in <dir>/pairs.tsv.
-#   bin/check-dkms container <same options as run>
+#   bin/check-dkms container <same options as run> [--result <file>]
 #       Run it in a throwaway container of the right image (needs Docker).
+#       --result writes the outcome as JSON: {"arch", "kernel", "module",
+#       "outcome": passed|excluded|known-broken|fixed|failed|error, "detail"}.
+#       Exits 0 for passed, excluded and known-broken.
+#   bin/check-dkms report --legs <legs.json> --results <dir> [--plan <job result>]
+#                         [--url <run>] [--note <text>] [--channel <channel>]
+#       The verdict of a CI run, from its matrix legs and the --result files
+#       in <dir>: {"conclusion", "title", "summary"} as JSON. A leg without a
+#       result failed, and a plan that did not succeed fails the run.
 #   bin/check-dkms judge --arch <arch> < <raw results>
 #       Judge run's raw results ("<kernel> <kver> <package> <tree> <built|
 #       excluded|failed> <note>" per line) against ci/dkms-packages: a
@@ -81,7 +90,8 @@ if [[ $mode == toolchain ]]; then
   exit 0
 fi
 arch="" channel="" files_db="" local_dir="" since="" since_db="" only="" from_repos=0
-pair_kernel="" pair_module="" save_local="" results_dir=""
+pair_kernel="" pair_module="" save_local="" results_dir="" all_pairs=0
+result_file="" legs_file="" plan_result="" run_url="" note=""
 repo_dbs=()
 while (($#)); do
   case $1 in
@@ -98,9 +108,66 @@ while (($#)); do
     --module) pair_module=${2:?--module needs a value}; shift 2 ;;
     --save-local) save_local=${2:?--save-local needs a value}; shift 2 ;;
     --results) results_dir=${2:?--results needs a directory}; shift 2 ;;
+    --all) all_pairs=1; shift ;;
+    --result) result_file=${2:?--result needs a file}; shift 2 ;;
+    --legs) legs_file=${2:?--legs needs a file}; shift 2 ;;
+    --plan) plan_result=${2-}; shift 2 ;;
+    --url) run_url=${2-}; shift 2 ;;
+    --note) note=${2-}; shift 2 ;;
     *) usage ;;
   esac
 done
+
+# A CI run's verdict, for its summary and the pull request's single check.
+# Leg names and details come from package metadata a pull request controls,
+# so they are reduced to plain text before they reach the markdown.
+report() {
+  [[ -f $legs_file ]] || die "report needs --legs <file>"
+  [[ -d $results_dir ]] || die "report needs --results <dir>"
+  local leg_results=()
+  shopt -s nullglob
+  leg_results=("$results_dir"/*.json)
+  shopt -u nullglob
+  jq -n --slurpfile legs "$legs_file" --slurpfile results <(cat /dev/null "${leg_results[@]}") \
+    --arg plan "$plan_result" --arg url "$run_url" --arg note "$note" --arg channel "$channel" '
+    def clean: tostring | gsub("[[:cntrl:]|<>`*\\[\\]\\\\]"; " ") | .[0:400];
+    def rank: {failed: 0, error: 0, missing: 0, fixed: 1, "known-broken": 2, passed: 3, excluded: 4}[.] // 0;
+    def word: {failed: "failed", error: "error", missing: "no result", fixed: "builds now",
+      "known-broken": "known broken", passed: "passed", excluded: "excluded"}[.] // (. | clean);
+    ($legs[0] // []) as $all
+    | ($all | map(. as $leg
+        | ([$results[] | select(.arch == $leg.arch and .kernel == $leg.kernel and .module == $leg.module)] | first) as $r
+        | $leg + {outcome: ($r.outcome // "missing"), detail: (if $r == null then "the leg left no result" else ($r.detail // "") end)})) as $rows
+    | ($rows | length) as $m
+    | ([$rows[] | select(.outcome == "passed" or .outcome == "excluded")] | length) as $n
+    | ([$rows[] | select(.outcome == "known-broken")] | length) as $k
+    | ($m - $n - $k) as $f
+    | (if $url == "" then "" else "[Open the run, with every leg](\($url))" end) as $link
+    | (if $channel == "" then "" else " on \($channel | clean)" end) as $where
+    | if $plan != "" and $plan != "success" then
+        {conclusion: "failure", title: "The DKMS plan did not finish",
+         summary: "The plan ended as \($plan | clean), so nothing was checked. \($link)"}
+      elif $m == 0 then
+        {conclusion: "success", title: "Nothing to check",
+         summary: ((if $note == "" then "Nothing to build" + $where + "." else ($note | clean) end) + " " + $link)}
+      else
+        ("\($n)/\($m) passed" + (if $k > 0 then ", \($k) known broken" else "" end)
+          + (if $f > 0 then ", \($f) failed" else "" end)) as $title
+        | {conclusion: (if $f == 0 then "success" else "failure" end), title: $title,
+           summary: ([
+             "**\($title)**" + $where + (if $note == "" then "" else ": " + ($note | clean) end) + ".",
+             "", $link, "",
+             "| Result | Arch | Kernel | Module | Detail |", "|---|---|---|---|---|"]
+             + ($rows | sort_by((.outcome | rank), .arch, .kernel, .module)
+                | map("| \(.outcome | word) | \(.arch | clean) | \(.kernel | clean) | \(.module | clean) | \(.detail | clean) |"))
+             | join("\n"))}
+      end'
+}
+if [[ $mode == report ]]; then
+  report
+  exit 0
+fi
+
 case $arch in x86_64 | aarch64) ;; *) die "--arch must be x86_64 or aarch64" ;; esac
 # run, and matrix without --files-db, download the channel's databases and the
 # repo= packages' from its mirror; plan only reads the files it is given.
@@ -295,7 +362,7 @@ read_local() {
     found=1
   done
   # matrix asks about each architecture; one with nothing built has no legs.
-  ((found)) || [[ $mode == matrix ]] || die "--local $local_dir holds no package for $arch"
+  ((found || all_pairs)) || [[ $mode == matrix ]] || die "--local $local_dir holds no package for $arch"
 }
 
 # The packages a check runs over: the channel's, with --local's in place of
@@ -338,7 +405,9 @@ changed_names() {
 
 changed_unfiltered() {
   local packages=$1 fresh=$2 previous=$3
-  if [[ -n $fresh ]]; then
+  if ((all_pairs)); then
+    cut -f2 <<<"$packages"
+  elif [[ -n $fresh ]]; then
     cut -f2 <<<"$fresh"
   elif [[ -n $previous ]]; then
     # A package taken from Arch does not move with a promotion: it pairs
@@ -411,7 +480,7 @@ plan_for() { # plan_for <channel db> [since db]: sets PACKAGES, CHANGED, PAIRS
   if [[ -n $local_dir ]]; then
     fresh=$(read_local)
     # Only matrix gets here with nothing built for this architecture.
-    [[ -n $fresh ]] || return 0
+    [[ -n $fresh ]] || ((all_pairs)) || return 0
   fi
   [[ -z ${2:-} ]] || previous=$(read_db "$2")
   published=$(read_db "$1")
@@ -482,7 +551,7 @@ download_channel() {
 # package is checked, with --from-repos, or when a kernel changes: a fresh one,
 # or one whose version differs from --since's.
 repos_needed() { # repos_needed <published> <fresh> <previous>
-  ((from_repos)) && return 0
+  ((from_repos || all_pairs)) && return 0
   [[ -n $2 || -n $3 ]] || return 0
   if [[ -n $2 ]]; then
     awk -F'\t' '$1 == "kernel" { f = 1 } END { exit !f }' <<<"$2"
@@ -504,6 +573,29 @@ load_repo_dbs() {
   done < <(cut -f2 <<<"$REPOS" | sort -u)
 }
 
+# A leg's outcome, from run's exit status and its verdicts: the worst pair
+# decides it. The status must agree with the verdicts, and a run that stopped
+# (any other status, or no verdicts) is an error, never a pass.
+leg_result() { # leg_result <status> <pairs.tsv>
+  local status=$1 pairs=$2
+  [[ -f $pairs ]] || pairs=/dev/null
+  jq -n --arg arch "$arch" --arg kernel "$pair_kernel" --arg module "$pair_module" \
+    --argjson status "$status" --rawfile pairs "$pairs" '
+    def rank: {failed: 5, fixed: 4, "known-broken": 3, built: 2, excluded: 1}[.] // 0;
+    ($pairs | split("\n") | map(select(length > 0) | split("\t") | {tree: .[3], verdict: .[4], text: (.[5] // "")})) as $p
+    | (if ($p | length) == 0 then "" else ($p | max_by(.verdict | rank) | .verdict) end) as $worst
+    | (if ($status != 0 and $status != 1) or ($p | length) == 0 then
+         {outcome: "error", detail: "the check stopped before it built anything (exit status \($status))"}
+       elif ($status == 1) != ($worst == "failed" or $worst == "fixed") then
+         {outcome: "error", detail: "exit status \($status) disagrees with the verdicts"}
+       else
+         {outcome: (if $worst == "built" then "passed" else $worst end),
+          detail: (if ($p | length) == 1 then (if $p[0].text == "built" then "" else $p[0].text end)
+                   else ($p | map("\(.tree): \(.text)") | join("; ")) end)}
+       end)
+    | {arch: $arch, kernel: $kernel, module: $module} + .'
+}
+
 print_plan() {
   awk -F'\t' '{ print $1 "\t" $2 "\t" $3 "\t" $6 }' <<<"$PACKAGES"
   if [[ -n $PAIRS ]]; then
@@ -517,7 +609,7 @@ case $mode in
   matrix)
     # The legs a CI run fans out into, each built by run --kernel --module.
     # A build with nothing for this architecture has none; nothing to download.
-    if [[ -n $local_dir && -z $(read_local) ]]; then
+    if [[ -n $local_dir && -z $(read_local) ]] && ((!all_pairs)); then
       echo "$arch: this build has nothing for $arch" >&2
       echo '[]'
       exit 0
@@ -567,19 +659,44 @@ case $mode in
     [[ -z $since ]] || args+=(--since "$since")
     [[ -z $only ]] || args+=(--packages "$only")
     ((!from_repos)) || args+=(--from-repos)
+    ((!all_pairs)) || args+=(--all)
     [[ -z $pair_kernel ]] || args+=(--kernel "$pair_kernel")
     [[ -z $pair_module ]] || args+=(--module "$pair_module")
     if [[ -n $local_dir ]]; then
       mounts+=(-v "$(realpath "$local_dir"):/local:ro")
       args+=(--local /local)
     fi
+    # run writes each pair's verdict here; the outcome is decided out here.
+    results=$(mktemp -d)
+    trap 'rm -rf "$results"' EXIT
+    mounts+=(-v "$results:/results")
+    args+=(--results /results)
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       mounts+=(-v "$GITHUB_STEP_SUMMARY:/summary.md")
       args=(env GITHUB_STEP_SUMMARY=/summary.md bash /src/bin/check-dkms "${args[@]}")
     else
       args=(bash /src/bin/check-dkms "${args[@]}")
     fi
-    exec docker run --rm "${mounts[@]}" "$image" "${args[@]}"
+    # The container runs a pull request's code: its kernel's and modules'
+    # Makefiles. Nothing they print may act as a workflow command on the
+    # runner (::add-mask::, ::set-output::, ::error::).
+    stop=""
+    if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+      stop=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+      echo "::stop-commands::$stop"
+    fi
+    status=0
+    docker run --rm "${mounts[@]}" "$image" "${args[@]}" || status=$?
+    [[ -z $stop ]] || echo "::$stop::"
+    outcome=$(leg_result "$status" "$results/pairs.tsv") || die "cannot summarise the leg"
+    if [[ -n $result_file ]]; then
+      printf '%s\n' "$outcome" >"$result_file" || die "cannot write $result_file"
+    fi
+    echo "==> $(jq -r '"\(.outcome)\(if .detail == "" then "" else ": " + .detail end)"' <<<"$outcome")"
+    case $(jq -r .outcome <<<"$outcome") in
+      passed | excluded | known-broken) exit 0 ;;
+      *) exit 1 ;;
+    esac
     ;;
 
   run)

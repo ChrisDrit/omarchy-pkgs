@@ -553,7 +553,7 @@ case $mode in
     line_of() { awk -F'\t' -v n="$1" '$2 == n' <<<"$PACKAGES"; }
 
     for name in $(cut -f1 <<<"$PAIRS" | sort -u); do
-      IFS=$'\t' read -r _ _ _ file sha kver <<<"$(line_of "$name")"
+      IFS=$'\t' read -r _ _ _ file sha kver _ <<<"$(line_of "$name")"
       fetch "$file" "$sha"
       echo "==> Installing $name ($kver)"
       pacman -U --noconfirm --needed "$FETCHED" >/dev/null || die "cannot install $name"

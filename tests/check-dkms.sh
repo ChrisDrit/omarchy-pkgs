@@ -107,6 +107,20 @@ grep -q 'holds no package for x86_64' "$tmp/stderr" && pass "an empty --local is
 if check --local "$tmp/missing" >/dev/null; then fail "a missing --local must fail"; fi
 grep -q 'is not a directory' "$tmp/stderr" && pass "a missing --local is an error" || fail "missing: $(cat "$tmp/stderr")"
 
+# kernels= limits a module to the kernels it is installed with.
+entry scoped linux-aurora-headers 7.1.12-2 usr/lib/modules/7.1.12-2-ARCH/build/Makefile
+entry scoped linux-omarchy-headers 7.2.8-13 usr/lib/modules/7.2.8-13-omarchy/build/Makefile
+entry scoped omarchy-ane-dkms 0.4.9-1 usr/src/omarchy-ane-0.4.9/dkms.conf
+entry scoped xpadneo-dkms 0.10.4-1 usr/src/hid-xpadneo-v0.10.4/dkms.conf
+channel scoped
+printf '%s\n' 'omarchy-ane-dkms aarch64 kernels=linux-aurora-headers' 'xpadneo-dkms x86_64 aarch64' >"$tmp/registry"
+plan=$("$ROOT/bin/check-dkms" plan --arch aarch64 --files-db "$tmp/scoped.files" 2>/dev/null)
+grep -qP '^pair\tlinux-aurora-headers 7.1.12-2-ARCH\tomarchy-ane-dkms ' <<<"$plan" &&
+  ! grep -qP '^pair\tlinux-omarchy-headers \S+\tomarchy-ane-dkms ' <<<"$plan" &&
+  [[ $(grep -c $'^pair\t.*xpadneo-dkms' <<<"$plan") == 2 ]] &&
+  pass "a module limited to some kernels is only built against those" || fail "scope: $plan"
+printf '%s\n' 'tuxedo-drivers-nocompatcheck-dkms x86_64' 'intel-ipu7-camera x86_64' >"$tmp/registry"
+
 # run installs packages, so it must refuse to start without root. Checked only
 # when not root: as root it would really install them.
 if ((EUID != 0)); then

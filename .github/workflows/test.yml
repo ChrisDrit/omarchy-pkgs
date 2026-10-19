@@ -44,6 +44,9 @@ jobs:
       - name: Test that a PR build sees exactly the PR's package tree
         run: node --test tests/build-pr-overlay.cjs
 
+      - name: Test that the plans hand every package name to the matrix
+        run: node --test tests/plan-names.cjs
+
       # An Arch container for vercmp: version ordering has to be decided by
       # the same comparator pacman uses on users' machines.
       - name: Run self-tests

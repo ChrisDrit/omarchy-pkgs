@@ -50,12 +50,25 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          if [[ -n $DISPATCH_PACKAGES ]]; then
+          if [[ $GITHUB_EVENT_NAME == "workflow_dispatch" ]]; then
+            if [[ -z ${DISPATCH_PACKAGES//[[:space:]]/} ]]; then
+              echo "::error::Name the package directories to publish."
+              exit 1
+            fi
             # Separated by spaces in the dispatch form, one to a line here.
             names=$(tr -s '[:space:]' '\n' <<<"$DISPATCH_PACKAGES")
           else
-            names=$(git diff --name-only "$BEFORE..$GITHUB_SHA" -- pkgbuilds \
-              | awk -F/ '$1=="pkgbuilds" && NF>2 {print $2}' | sort -u)
+            # Paths NUL-separated, so git does not quote an odd one (which
+            # the old filter then dropped), and a newline in a name written
+            # as \n: a name bin/build-matrix must refuse reaches it whole.
+            names=$(git diff --name-only -z "$BEFORE..$GITHUB_SHA" -- pkgbuilds |
+              while IFS= read -r -d '' path; do
+                name=${path#pkgbuilds/}
+                if [[ $name == */* ]]; then
+                  name=${name%%/*}
+                  printf '%s\n' "${name//$'\n'/\\n}"
+                fi
+              done | sort -u)
           fi
           # One name to a line, as given: bin/build-matrix refuses any name
           # makepkg would, and the shell neither splits nor globs one first.

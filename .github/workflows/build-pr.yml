@@ -103,7 +103,12 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if [[ -n $DISPATCH_PACKAGES ]]; then
+          set -euo pipefail
+          if [[ $GITHUB_EVENT_NAME == "workflow_dispatch" ]]; then
+            if [[ -z ${DISPATCH_PACKAGES//[[:space:]]/} ]]; then
+              echo "::error::Name the package directories to build."
+              exit 1
+            fi
             # Separated by spaces in the dispatch form, one to a line here.
             names=$(tr -s '[:space:]' '\n' <<<"$DISPATCH_PACKAGES")
           else
@@ -112,12 +117,13 @@ jobs:
             # package master changed after the PR branched, so a stale PR
             # planned dozens of unrelated packages at its old versions. The
             # checkout here is shallow, so there is no merge base to diff from.
-            # A package the PR deletes has nothing to build.
-            names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename' \
-              | awk -F/ '$1=="pkgbuilds" && NF>2 {print $2}' | sort -u \
-              | while read -r name; do
-                  if git cat-file -e "$HEAD_SHA:pkgbuilds/$name" 2>/dev/null; then echo "$name"; fi
-                done)
+            # A package the PR deletes has nothing to build: the overlay above
+            # removed its directory, and bin/build-matrix skips it. Each name
+            # is cut from the JSON whole, a newline in it written as \n, so a
+            # name bin/build-matrix must refuse reaches it rather than being
+            # split, trimmed or dropped on the way; a failed listing fails.
+            names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+              --jq '.[].filename | split("/") | select(.[0] == "pkgbuilds" and length > 2) | .[1] | gsub("\n"; "\\n")' | sort -u)
           fi
           # One name to a line, as given: bin/build-matrix refuses any name
           # makepkg would, and the shell neither splits nor globs one first.

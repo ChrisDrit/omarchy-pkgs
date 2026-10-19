@@ -60,7 +60,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git fetch --no-tags --depth=1 origin "$HEAD_SHA"
-          git checkout "$HEAD_SHA" -- pkgbuilds/
+          # --no-overlay: a file the PR deleted goes too (see the build job).
+          git checkout --no-overlay "$HEAD_SHA" -- pkgbuilds/
           # Bootstrap: the PR that introduces this tooling has a base without
           # it. Take the plan helper from the PR head in that one case; it
           # runs on a hosted runner and only prints a plan.
@@ -237,7 +238,15 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$HEAD_SHA"
-          git checkout "$HEAD_SHA" -- pkgbuilds/
+          # Exactly the PR head's package directories. A plain checkout only
+          # adds and updates, so a patch or hook the PR deleted stayed from
+          # base and went into a build whose artifact is named for a tree
+          # without it; --no-overlay removes it, and the check proves it.
+          git checkout --no-overlay "$HEAD_SHA" -- pkgbuilds/
+          if ! git diff --quiet "$HEAD_SHA" -- pkgbuilds/ || [[ -n $(git ls-files --others -- pkgbuilds/) ]]; then
+            echo "::error::pkgbuilds/ is not the tree of $HEAD_SHA"
+            exit 1
+          fi
           echo "tooling: $(git rev-parse --short HEAD) (base)  packages: $HEAD_SHA (PR head)"
           # A preview only. `head` exits after ten lines and, under pipefail,
           # git's SIGPIPE (141) failed the step for any PR far enough behind

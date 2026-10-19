@@ -41,6 +41,9 @@ jobs:
       - name: Test that workflow scripts take values through env
         run: node --test tests/workflow-expressions.cjs
 
+      - name: Test that a PR build sees exactly the PR's package tree
+        run: node --test tests/build-pr-overlay.cjs
+
       # An Arch container for vercmp: version ordering has to be decided by
       # the same comparator pacman uses on users' machines.
       - name: Run self-tests

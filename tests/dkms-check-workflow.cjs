@@ -73,12 +73,19 @@ test('a build the check ignores, or one of an older commit, cannot cancel the he
   const group = workflow.split(/^concurrency:\n/m)[1].split(/^\S/m)[0];
   assert.match(group, /format\('sha-\{0\}', github\.event\.workflow_run\.head_sha\)/, 'pull request builds are keyed by commit');
   assert.match(group, /format\('ignored-\{0\}', github\.run_id\)/, 'ignored builds get a group of their own');
+  assert.match(group, /github\.event\.workflow_run\.path == '\.github\/workflows\/build-pr\.yml'/,
+    'a same-named workflow is ignored here as it is in target');
   assert.doesNotMatch(group, /head_branch/, 'never by branch, which an older commit shares');
 });
 
 test('a fork that changes build-pr.yml is refused, not checked on its own word', () => {
   const all = jobs(read('dkms-check.yml'));
-  assert.match(all.target, /grep -qxF \.github\/workflows\/build-pr\.yml/);
+  // Provenance from the build run, in every mode, through checked commands:
+  // no pipeline whose failure reads as "not changed".
+  assert.match(all.target, /build=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/actions\/runs\/\$run"\)/);
+  assert.match(all.target, /ours=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/contents\/\.github\/workflows\/build-pr\.yml\?ref=\$base" --jq \.sha\)/);
+  assert.match(all.target, /\$theirs != "\$ours"/);
+  assert.doesNotMatch(all.target, /\| *grep -q/, 'grep -q in a pipeline fails open under pipefail');
   assert.match(all.target, /refused: \$\{\{ steps\.open\.outputs\.refused \}\}/);
   assert.match(all.dkms, /needs\.target\.outputs\.refused == ''/, 'a refused pull request runs no legs');
   assert.match(all.report, /CONCLUSION=failure TITLE="Not checked"/, 'and its check fails');

@@ -76,6 +76,7 @@ concurrency:
   group: >-
     dkms-check-${{ github.event_name == 'workflow_run'
       && (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.path == '.github/workflows/build-pr.yml'
         && format('sha-{0}', github.event.workflow_run.head_sha) || format('ignored-{0}', github.run_id))
       || ((inputs.pr || inputs.head_sha) && format('pr-{0}-{1}', inputs.pr, inputs.head_sha))
       || format('{0}-{1}-{2}-{3}', github.event_name, github.ref, inputs.channel || 'edge', inputs.since || 'all') }}
@@ -86,7 +87,9 @@ jobs:
   # progress so the pull request shows it while the legs build. A commit the
   # pull request has moved past gets no check. The build's dkms-request is
   # only as good as the build-pr.yml that wrote it, and a fork's pull request
-  # runs its own copy: one that changes it is refused, never checked.
+  # runs its own copy: a build from a fork whose build-pr.yml differs from
+  # its merge base's is refused, never checked. Any API error fails this job
+  # before a check opens, so it fails closed.
   target:
     name: open the check
     if: >-
@@ -118,6 +121,7 @@ jobs:
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           PR: ${{ inputs.pr }}
           SHA: ${{ inputs.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -154,13 +158,19 @@ jobs:
             fi
           fi
           # A fork's pull request builds with its own build-pr.yml, which
-          # writes the dkms-request this check reads. If it changes that file,
-          # the request is the fork's word, not the build's.
-          if [[ -n $pr ]]; then
-            fork=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.head.repo.full_name != .base.repo.full_name')
-            if [[ $fork != false ]] && gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$pr/files" \
-              --jq '.[] | .filename, (.previous_filename // empty)' | grep -qxF .github/workflows/build-pr.yml; then
-              refused="Not checked: this pull request comes from a fork and changes .github/workflows/build-pr.yml, which writes what this check reads. Land the workflow change in a pull request of its own first."
+          # writes the dkms-request this check reads. Whether this build's
+          # copy is the base's comes from the build run itself, in every mode.
+          build=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run")
+          if [[ $(jq -r '.head_sha' <<<"$build") != "$sha" || $(jq -r '.path' <<<"$build") != .github/workflows/build-pr.yml ]]; then
+            echo "::error::run $run is not the pull request build of $sha"
+            exit 1
+          fi
+          if [[ $(jq -r '.head_repository.full_name // "" ' <<<"$build") != "$GITHUB_REPOSITORY" ]]; then
+            base=$(gh api "repos/$GITHUB_REPOSITORY/compare/${DEFAULT_BRANCH}...$sha" --jq .merge_base_commit.sha)
+            ours=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/build-pr.yml?ref=$base" --jq .sha)
+            theirs=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/build-pr.yml?ref=$sha" --jq .sha 2>/dev/null || echo missing)
+            if [[ -z $ours || $theirs != "$ours" ]]; then
+              refused="Not checked: this build comes from a fork whose .github/workflows/build-pr.yml differs from its merge base's, and that file writes what this check reads. Land the workflow change in a pull request of its own first."
             fi
           fi
           check=$(jq -n --arg sha "$sha" --arg url "$URL" '{

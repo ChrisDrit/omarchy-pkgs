@@ -43,6 +43,12 @@ plan --channels "stable beta" gone >/dev/null && fail "an unknown channel was ac
 pass "an unknown channel is refused"
 plan --channels "stable" 'bad name' >/dev/null && fail "a bad package name was accepted"
 pass "a bad package name is refused"
+out=$(plan --channels "stable" Gone-Up) || fail "a pkgbase makepkg allows was refused: $(cat "$T/err")"
+[[ $(line RETIRE_STABLE_X86_64) == Gone-Up ]] && pass "any pkgbase makepkg allows can be planned, capitals too" || fail "Gone-Up plan: $out"
+for bad in -dash .dot; do
+  plan --channels "stable" "$bad" >/dev/null && fail "$bad was accepted"
+done
+pass "a name makepkg refuses is refused"
 plan --channels >/dev/null && fail "a bare --channels was accepted"
 pass "a bare --channels is refused"
 

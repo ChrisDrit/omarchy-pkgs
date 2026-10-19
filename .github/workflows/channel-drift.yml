@@ -1,0 +1,63 @@
+name: Channel drift
+
+# Every entry a channel database serves must be one a recipe on master
+# publishes there. Publishing only adds and promotion only moves forward, so
+# an entry outlives its recipe when the recipe is deleted, drops an
+# architecture, or narrows its channels, and nobody runs "Unpublish retired
+# packages" after it: stable kept serving omarchy-dev from August after its
+# recipe was pinned to edge. bin/check-channel-drift finds such entries with
+# unpublish's own rule and prints the dispatch that retires them.
+#
+# Daily it checks master's recipes against the live channels. On a pull
+# request that touches a recipe it fails only on drift the change itself
+# adds, an entry it would leave behind, and names the unpublish to run once
+# the change is merged. That red is for the reviewer, not a merge gate: the
+# unpublish can only follow the merge, because unpublish-plan keeps whatever
+# master's recipes still publish. The daily run stays red until it has run.
+#
+# Read-only: the public channel databases and the checkout, no secrets.
+
+on:
+  schedule:
+    # Daily, off the hour to dodge the scheduling backlog at :00
+    - cron: '50 5 * * *'
+  # Into master only: the channels are published from it, and the unpublish
+  # runs on its recipes.
+  pull_request:
+    branches: [master]
+    paths:
+      - 'pkgbuilds/*/PKGBUILD'
+      - 'pkgbuilds/*/.omarchy/package.json'
+      - bin/check-channel-drift
+      - helpers/package-metadata.sh
+      - helpers/channel-db.sh
+      - .github/workflows/channel-drift.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A pull request checks out its merge commit; the first parent is
+          # the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Check the channels against the recipes
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ $EVENT == "pull_request" ]]; then
+            mkdir "$RUNNER_TEMP/base"
+            git archive HEAD^1 pkgbuilds | tar -x -C "$RUNNER_TEMP/base"
+            bin/check-channel-drift --base "$RUNNER_TEMP/base/pkgbuilds"
+          else
+            bin/check-channel-drift
+          fi

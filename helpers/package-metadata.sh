@@ -327,6 +327,81 @@ package_dirs() {
   done
 }
 
+# Whether a channel database's entry belongs there, by its pkgbase. Used by
+# bin/unpublish-plan to decide what may go and by bin/check-channel-drift to
+# find what should have gone, so the two cannot disagree.
+#
+# package_index_pkgbases <arch>... reads every recipe in full and fills
+# PKGBASE_RECIPE["<arch>/<pkgbase>"] with the recipe that builds that pkgbase
+# there, which is not always its directory's name (pkgbuilds/yaru-icon-theme
+# builds yaru). A recipe left out would read as gone, so it fails, and
+# nothing should be decided, when a directory under pkgbuilds/ has no
+# PKGBUILD or no .omarchy/package.json, a recipe's channels can't be read, a
+# PKGBUILD fails to source (package_pkgbase would fall back to the
+# directory's name), or there are no recipes at all. The glob runs in this
+# shell, so nothing can fail unseen in a pipeline.
+package_index_pkgbases() {
+  local arch pkgdir base
+  local -a recipes=()
+  declare -gA PKGBASE_RECIPE=()
+  for pkgdir in "$PKGBUILDS_DIR"/*/; do
+    pkgdir=${pkgdir%/}
+    [[ -d $pkgdir ]] || continue
+    if [[ ! -f $pkgdir/PKGBUILD ]]; then
+      echo "::error::pkgbuilds/${pkgdir##*/} has no PKGBUILD" >&2
+      return 1
+    elif [[ ! -f $pkgdir/.omarchy/package.json ]]; then
+      echo "::error::pkgbuilds/${pkgdir##*/} has no .omarchy/package.json" >&2
+      return 1
+    elif ! package_channels_valid "$pkgdir"; then
+      echo "::error::Cannot read the channels of pkgbuilds/${pkgdir##*/}" >&2
+      return 1
+    fi
+    recipes+=("$pkgdir")
+  done
+  if (( ${#recipes[@]} == 0 )); then
+    echo "::error::No recipes in $PKGBUILDS_DIR" >&2
+    return 1
+  fi
+  for arch in "$@"; do
+    for pkgdir in "${recipes[@]}"; do
+      # A PKGBUILD can also stop early with success (exit 0) and say nothing.
+      if ! base=$(cd "$pkgdir" && env -u OMARCHY_SRC CARCH="$arch" bash -c '
+        source PKGBUILD >/dev/null 2>&1 || exit 1
+        base=${pkgbase:-${pkgname[0]:-}}
+        [[ -n $base ]] && printf "%s\n" "$base"
+      ') || [[ -z $base ]]; then
+        echo "::error::Cannot read pkgbuilds/${pkgdir##*/}/PKGBUILD for $arch" >&2
+        return 1
+      fi
+      PKGBASE_RECIPE[$arch/$base]=$pkgdir
+    done
+  done
+}
+
+# package_pkgbase_publisher <pkgbase> <channel> <arch> prints the recipe that
+# publishes the pkgbase to that channel and architecture. When none does, it
+# prints why and fails: no recipe builds it, its recipe no longer builds for
+# that architecture (pinta is aarch64-only), or its channels leave that
+# channel out (omarchy-dev is edge-only). Needs package_index_pkgbases.
+package_pkgbase_publisher() {
+  local base="$1" channel="$2" arch="$3"
+  local pkgdir=${PKGBASE_RECIPE[$arch/$base]:-}
+
+  [[ -n $pkgdir || ! -e $PKGBUILDS_DIR/$base ]] || pkgdir=$PKGBUILDS_DIR/$base
+  if [[ -z $pkgdir ]]; then
+    echo "no recipe builds it"
+    return 1
+  elif ! package_supports_arch "$pkgdir" "$arch"; then
+    echo "pkgbuilds/${pkgdir##*/} does not build for $arch"
+    return 1
+  elif ! package_in_channel "$pkgdir" "$channel"; then
+    echo "pkgbuilds/${pkgdir##*/} leaves $channel out of its channels"
+    return 1
+  fi
+  echo "$pkgdir"
+}
+
 
 package_has_upstream_hook() {
   local pkgdir="$1"

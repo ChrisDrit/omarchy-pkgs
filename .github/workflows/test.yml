@@ -70,6 +70,7 @@ jobs:
               ./tests/pinned-sources.sh
               ./tests/package-metadata.sh
               ./tests/unpublish-plan.sh
+              ./tests/check-channel-drift.sh
               ./tests/fast-ring-check.sh
               ./tests/controller.sh
               ./tests/artifact-helpers.sh

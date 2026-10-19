@@ -35,63 +35,20 @@ for c in $channels; do
   [[ $c == edge || $c == rc || $c == stable ]] || { echo "::error::Unknown channel: $c" >&2; exit 1; }
 done
 
-# The pkgbase a recipe builds for an architecture. Unlike package_pkgbase, a
-# PKGBUILD that fails to source is an error rather than its directory's name:
-# a recipe missing from the lookup would read as gone and be retired.
-recipe_pkgbase() { # recipe_pkgbase <pkgdir> <arch>
-  (cd "$1" && env -u OMARCHY_SRC CARCH="$2" bash -c '
-    source PKGBUILD >/dev/null 2>&1 || exit 1
-    base=${pkgbase:-${pkgname[0]:-}}
-    [[ -n $base ]] && printf "%s\n" "$base"
-  ')
-}
-
-# Every recipe, read in full. A directory under pkgbuilds/ without a PKGBUILD
-# or .omarchy/package.json, channels that can't be read, or no recipes at all
-# stop the plan: package_dirs would skip such a recipe without a word, and it
-# would read as gone. The glob runs in this shell, so nothing can fail
-# unseen in a pipeline.
-recipes=()
-for pkgdir in "$PKGBUILDS_DIR"/*/; do
-  pkgdir=${pkgdir%/}
-  [[ -d $pkgdir ]] || continue
-  if [[ ! -f $pkgdir/PKGBUILD ]]; then
-    echo "::error::pkgbuilds/${pkgdir##*/} has no PKGBUILD; not planning anything" >&2
-    exit 1
-  elif [[ ! -f $pkgdir/.omarchy/package.json ]]; then
-    echo "::error::pkgbuilds/${pkgdir##*/} has no .omarchy/package.json; not planning anything" >&2
-    exit 1
-  elif ! package_channels_valid "$pkgdir"; then
-    echo "::error::Cannot read the channels of pkgbuilds/${pkgdir##*/}; not planning anything" >&2
-    exit 1
-  fi
-  recipes+=("$pkgdir")
-done
-(( ${#recipes[@]} )) || { echo "::error::No recipes in $PKGBUILDS_DIR; not planning anything" >&2; exit 1; }
-
-# Recipes by the pkgbase they build on each architecture.
-declare -A RECIPE=()
-for arch in "${ARCHES[@]}"; do
-  for pkgdir in "${recipes[@]}"; do
-    # A PKGBUILD can also stop early with success (exit 0) and say nothing.
-    if ! base=$(recipe_pkgbase "$pkgdir" "$arch") || [[ -z $base ]]; then
-      echo "::error::Cannot read pkgbuilds/${pkgdir##*/}/PKGBUILD for $arch; not planning anything" >&2
-      exit 1
-    fi
-    RECIPE[$arch/$base]=$pkgdir
-  done
-done
+# A recipe that cannot be read in full would drop out of the index, read as
+# gone and be retired, so nothing is planned (package_index_pkgbases).
+package_index_pkgbases "${ARCHES[@]}" || { echo "::error::Not planning anything" >&2; exit 1; }
 
 declare -A retire=()
 for p in "$@"; do
-  [[ $p =~ ^[a-z0-9@._+-]+$ ]] || { echo "::error::Not a package name: $p" >&2; exit 1; }
+  # makepkg's rule (lint_one_pkgname): alphanumerics and +_.@-, not starting
+  # with - or ., so every pkgbase check-channel-drift can name is accepted.
+  [[ $p =~ ^[A-Za-z0-9+_@][A-Za-z0-9+_.@-]*$ ]] || { echo "::error::Not a package name: $p" >&2; exit 1; }
   kept=0 asked=0
   for c in $channels; do
     for arch in "${ARCHES[@]}"; do
       asked=$((asked + 1))
-      pkgdir=${RECIPE[$arch/$p]:-}
-      [[ -n $pkgdir || ! -e $PKGBUILDS_DIR/$p ]] || pkgdir=$PKGBUILDS_DIR/$p
-      if [[ -n $pkgdir ]] && package_supports_arch "$pkgdir" "$arch" && package_in_channel "$pkgdir" "$c"; then
+      if pkgdir=$(package_pkgbase_publisher "$p" "$c" "$arch"); then
         echo "Keeping $p in $c/$arch: pkgbuilds/${pkgdir##*/} still publishes it there" >&2
         kept=$((kept + 1))
       else

@@ -1,0 +1,126 @@
+#!/bin/bash
+# Check that every channel database holds only packages a recipe publishes
+# there.
+#
+#   check-channel-drift [--base <pkgbuilds dir>]
+#
+# Reads edge, rc and stable for x86_64 and aarch64 from the published
+# repository (OMARCHY_PUBLISHED_REPO_URL, default https://pkgs.omarchy.org)
+# and checks every pkgbase in them against the recipes in pkgbuilds/ with
+# the rule bin/unpublish-plan applies (package_pkgbase_publisher). An entry
+# no recipe publishes to its channel and architecture is drift: its recipe
+# was deleted, dropped that architecture, or narrowed its channels after the
+# package had reached one they now leave out (stable kept omarchy-dev's
+# August build after its recipe was pinned to edge). Publishing only adds and
+# promotion only moves forward, so nothing but an unpublish takes such an
+# entry out.
+#
+# The other direction is not checked: rc and stable lag edge until the next
+# promotion, on purpose.
+#
+# --base names the recipes before a change, a pull request's base. Then only
+# drift the change adds fails; drift already there is counted, and left to
+# the daily run.
+#
+# Exits 1 on drift and prints the "Unpublish retired packages" dispatch that
+# retires it, 2 when a database, one of its entries or a recipe cannot be
+# read in full. Reads public URLs only.
+# OMARCHY_PKGBUILDS names another recipe directory (tests).
+set -euo pipefail
+ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
+source "$ROOT/helpers/package-metadata.sh"
+source "$ROOT/helpers/channel-db.sh"
+PKGBUILDS_DIR=${OMARCHY_PKGBUILDS:-$ROOT/pkgbuilds}
+REPO_URL=${OMARCHY_PUBLISHED_REPO_URL:-https://pkgs.omarchy.org}
+CHANNELS=(edge rc stable)
+ARCHES=(x86_64 aarch64)
+
+base=""
+if (( $# )); then
+  if [[ $1 != "--base" || ! -d ${2:-} ]] || (( $# != 2 )); then
+    echo "::error::usage: check-channel-drift [--base <pkgbuilds dir>]" >&2
+    exit 2
+  fi
+  base=$2
+fi
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# One line per database entry: channel, arch, pkgbase, name, version, build
+# date (helpers/channel-db.sh).
+: > "$WORK/entries.tsv"
+for c in "${CHANNELS[@]}"; do
+  for a in "${ARCHES[@]}"; do
+    channel_db_entries "$REPO_URL/$c/$a/omarchy.db" "$c" "$a" >> "$WORK/entries.tsv" || exit 2
+    echo "$c/$a: $(awk -F'\t' -v c="$c" -v a="$a" '$1 == c && $2 == a' "$WORK/entries.tsv" | wc -l) entries"
+  done
+done
+
+# drift <pkgbuilds dir>: one "<channel> <arch> <pkgbase> <why>" line, tab
+# separated, for every pkgbase a database holds where no recipe in that
+# directory publishes it. Fails when a recipe there cannot be read, which
+# would otherwise read as gone. The helpers read PKGBUILDS_DIR, so the local
+# one is theirs for the call.
+drift() {
+  local PKGBUILDS_DIR=$1 c a b why
+  package_index_pkgbases "${ARCHES[@]}" || return 1
+  cut -f1-3 "$WORK/entries.tsv" | LC_ALL=C sort -u | while IFS=$'\t' read -r c a b; do
+    why=$(package_pkgbase_publisher "$b" "$c" "$a") || printf '%s\t%s\t%s\t%s\n' "$c" "$a" "$b" "$why"
+  done
+}
+
+drift "$PKGBUILDS_DIR" > "$WORK/drift.tsv" || exit 2
+if [[ -n $base ]]; then
+  if ! drift "$base" | cut -f1-3 > "$WORK/before.tsv"; then
+    echo "::error::Cannot read the recipes in $base, the ones before this change" >&2
+    exit 2
+  fi
+  # By file name, not NR == FNR: that also holds for the second file when the
+  # base had no drift at all.
+  awk -F'\t' -v before="$WORK/before.tsv" 'FILENAME == before { seen[$0] = 1; next } !(($1 "\t" $2 "\t" $3) in seen)' \
+    "$WORK/before.tsv" "$WORK/drift.tsv" > "$WORK/new.tsv"
+else
+  cp "$WORK/drift.tsv" "$WORK/new.tsv"
+fi
+
+day() {
+  if [[ -n $1 ]]; then
+    date -u -d "@$1" +%F
+  else
+    echo "unknown"
+  fi
+}
+
+while IFS=$'\t' read -r c a b why; do
+  held=""
+  while IFS=$'\t' read -r _ _ _ name ver built; do
+    held+="${held:+, }$name $ver (built $(day "$built"))"
+  done < <(awk -F'\t' -v c="$c" -v a="$a" -v b="$b" '$1 == c && $2 == a && $3 == b' "$WORK/entries.tsv")
+  echo "::error::$c/$a holds $held: $why"
+done < "$WORK/new.tsv"
+
+already=$(( $(wc -l < "$WORK/drift.tsv") - $(wc -l < "$WORK/new.tsv") ))
+if (( already )); then
+  echo "Before this change, $already database and pkgbase pairs already had no recipe publishing them; the daily check reports those."
+fi
+
+if [[ -s $WORK/new.tsv ]]; then
+  packages=$(cut -f3 "$WORK/new.tsv" | LC_ALL=C sort -u | paste -sd' ')
+  channels=$(cut -f1 "$WORK/new.tsv" | LC_ALL=C sort -u | paste -sd' ')
+  counts="$(wc -w <<<"$packages") pkgbase(s) where no recipe publishes them, $(wc -l < "$WORK/new.tsv") database and pkgbase pairs in all"
+  echo ""
+  if [[ -n $base ]]; then
+    echo "This change leaves $counts. Once it is merged, retire them with:"
+  else
+    echo "The channels hold $counts. Retire them with:"
+  fi
+  echo "  gh workflow run unpublish.yml -R omacom/omarchy-pkgs -f packages=\"$packages\" -f channels=\"$channels\""
+  exit 1
+fi
+
+if [[ -n $base ]]; then
+  echo "This change leaves nothing published where no recipe publishes it."
+else
+  echo "Every channel database holds only packages a recipe publishes there."
+fi

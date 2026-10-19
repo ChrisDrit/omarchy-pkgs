@@ -42,23 +42,34 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 print_header "Unpublish from $DEST"
 
+# Entries in a database, counted without grep -c, which fails on none.
+count_entries() { tar -tf "$1" | awk '/\/$/ { n++ } END { print n + 0 }'; }
+
 # --- 1. pull the current database -----------------------------------------
 mkdir -p "$WORK/repo"
-listing=$(rclone lsf "$DEST/" --s3-no-head 2>/dev/null || true)
+# A listing that fails is not an empty channel: saying "nothing to remove"
+# then would report an unpublish that never happened.
+listing=$(rclone lsf "$DEST/" --s3-no-head) || { print_error "Could not list $DEST"; exit 1; }
 if ! grep -q '^omarchy.db.tar.zst$' <<<"$listing"; then
   print_info "No database at $DEST; nothing to remove"
   exit 0
 fi
 rclone copy "$DEST/omarchy.db.tar.zst" "$WORK/repo" --s3-no-head
 rclone copy "$DEST/omarchy.files.tar.zst" "$WORK/repo" --s3-no-head 2>/dev/null || true
-before=$(tar -tf "$WORK/repo/omarchy.db.tar.zst" | grep -c '/$')
+before=$(count_entries "$WORK/repo/omarchy.db.tar.zst")
 print_info "Pulled current database ($before entries)"
 
 # --- 2. entries built from the named pkgbases -----------------------------
-names=$(bsdtar -xOf "$WORK/repo/omarchy.db.tar.zst" --include '*/desc' |
-  awk -v bases=" ${BASES[*]} " '
+# One desc per entry, read whole: a name carried over from the previous
+# record must never stand for this one's pkgbase.
+mkdir "$WORK/entries"
+bsdtar -xf "$WORK/repo/omarchy.db.tar.zst" -C "$WORK/entries"
+names=$(find "$WORK/entries" -name desc -print0 | xargs -0r awk -v bases=" ${BASES[*]} " '
+    function flush() { if (name != "" && index(bases, " " base " ")) print name; name = base = "" }
+    FNR == 1 && NR > 1 { flush() }
     /^%NAME%$/ { getline name }
-    /^%BASE%$/ { getline base; if (index(bases, " " base " ")) print name }')
+    /^%BASE%$/ { getline base }
+    END { flush() }')
 if [[ -z "$names" ]]; then
   print_info "None of ${BASES[*]} is in $MIRROR/$ARCH; nothing to remove"
   exit 0
@@ -70,7 +81,7 @@ for n in "${NAMES[@]}"; do print_step "removing $n"; done
 ( cd "$WORK/repo" && repo-remove --quiet omarchy.db.tar.zst "${NAMES[@]}" )
 ln -sf omarchy.db.tar.zst "$WORK/repo/omarchy.db"
 ln -sf omarchy.files.tar.zst "$WORK/repo/omarchy.files"
-after=$(tar -tf "$WORK/repo/omarchy.db.tar.zst" | grep -c '/$')
+after=$(count_entries "$WORK/repo/omarchy.db.tar.zst")
 (( before - after == ${#NAMES[@]} )) || {
   print_error "Expected to remove ${#NAMES[@]} entries, removed $((before - after))"; exit 1; }
 print_info "Database now has $after entries"

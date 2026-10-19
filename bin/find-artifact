@@ -1,0 +1,103 @@
+#!/bin/bash
+# The build artifact named <label> (<package>-<arch>-<tree hash>) that a run
+# this repository trusts uploaded, as one line:
+#   <artifact id> <run id> <expires at> <archive download url>
+#
+# Any run can upload an artifact under any name: a fork's pull request that
+# adds or changes a workflow can upload one named for another pull request's
+# package tree, and publish.yml signs what it collects. So an artifact counts
+# only when the run that uploaded it is
+#   - the run named with --run (publish.yml's own rebuild job), which wins
+#     over every other: it built exactly the commit being published. Its
+#     artifacts are listed first, on their own, so that no number of other
+#     uploads can stand between a rebuild and its publish; or
+#   - this repository's .github/workflows/build-pr.yml, for pull_request or
+#     workflow_dispatch, from a branch of this repository, which only
+#     writers push. The newest such artifact wins.
+# A fork's run never counts, whatever its build-pr.yml: the plan reads every
+# recipe the pull request touches by sourcing it on the runner, before the
+# approval gate, so a fork's own code runs inside its build-pr.yml run. Its
+# packages are rebuilt from the merged tree instead.
+# Untrusted artifacts are skipped and named on stderr. Every page of the
+# listing is read, newest first across them, so no number of untrusted
+# uploads hides a trusted one. Each run read spends the repository's shared
+# API budget, so past $max_reads runs the lookup stops (exit 2) and the
+# caller rebuilds instead.
+#
+# Usage: bin/find-artifact [--run <run id>] <label>
+#   Exit 0: the line above. Exit 1, nothing on stdout: no artifact by that
+#   name, or none from a run that can vouch for it; stderr says which. Exit 2:
+#   any error reading the API, so the caller decides rather than guessing.
+#   Needs gh (GH_TOKEN) and GITHUB_REPOSITORY.
+set -euo pipefail
+
+die() { echo "find-artifact: $*" >&2; exit 2; }
+
+this_run=""
+if [[ ${1:-} == "--run" ]]; then
+  (( $# >= 2 )) || die "usage: bin/find-artifact [--run <run id>] <label>"
+  this_run=$2
+  shift 2
+fi
+(( $# == 1 )) || die "usage: bin/find-artifact [--run <run id>] <label>"
+label=$1
+repo=${GITHUB_REPOSITORY:?find-artifact needs GITHUB_REPOSITORY}
+[[ -z $this_run || $this_run =~ ^[0-9]+$ ]] || die "run id $(printf %q "$this_run") is not a number"
+
+# Only what a build names an artifact: a makepkg package name, an
+# architecture and a tree hash. Ranges in the C locale, where [A-Z] is ASCII
+# only.
+valid_label() {
+  local LC_ALL=C
+  [[ $1 =~ ^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*-(x86_64|aarch64)-[0-9a-f]{40}$ ]]
+}
+valid_label "$label" || die "$(printf %q "$label") is not <package>-<arch>-<tree hash>"
+
+# Whether a run may vouch for an artifact (see the top). Each run is read once.
+declare -A vouches=()
+max_reads=50 reads=0
+trusted_run() { # trusted_run <run id>
+  local id=$1 info
+  [[ $id =~ ^[0-9]+$ ]] || return 1
+  [[ -z ${vouches[$id]:-} ]] || return "${vouches[$id]}"
+  reads=$((reads + 1))
+  (( reads <= max_reads )) || die "more than $max_reads runs uploaded an artifact named $label; not reading further"
+  info=$(gh api "repos/$repo/actions/runs/$id") || die "cannot read run $id"
+  vouches[$id]=1
+  [[ $(jq -r .path <<<"$info") == ".github/workflows/build-pr.yml" ]] || return 1
+  [[ $(jq -r .event <<<"$info") =~ ^(pull_request|workflow_dispatch)$ ]] || return 1
+  [[ $(jq -r '.head_repository.full_name // ""' <<<"$info") == "$repo" ]] || return 1
+  vouches[$id]=0
+}
+
+# -f encodes the name: makepkg allows "+", which a raw query reads as a space.
+if [[ -n $this_run ]]; then
+  own=$(gh api --method GET "repos/$repo/actions/runs/$this_run/artifacts" -f name="$label" \
+    --jq '.artifacts[] | select(.expired | not) | "\(.id) \(.workflow_run.id // "") \(.expires_at) \(.archive_download_url)"') ||
+    die "cannot list run $this_run's artifacts"
+  if [[ -n $own ]]; then
+    head -n 1 <<<"$own"
+    exit 0
+  fi
+fi
+
+candidates=$(gh api --method GET --paginate "repos/$repo/actions/artifacts" -f name="$label" -F per_page=100 \
+  --jq '.artifacts[] | select(.expired | not) | "\(.created_at)\t\(.id)\t\(.workflow_run.id // "")\t\(.expires_at)\t\(.archive_download_url)"') ||
+  die "cannot look up artifact $label"
+if [[ -z $candidates ]]; then
+  echo "$label: no artifact" >&2
+  exit 1
+fi
+candidates=$(sort -r <<<"$candidates")
+
+skipped=0
+while IFS=$'\t' read -r _ id producer expires url; do
+  if trusted_run "$producer"; then
+    echo "$id $producer $expires $url"
+    exit 0
+  fi
+  echo "$label: artifact $id skipped: run $producer cannot vouch for it" >&2
+  skipped=$((skipped + 1))
+done <<<"$candidates"
+echo "$label: none of its $skipped artifact(s) comes from a run that can vouch for it" >&2
+exit 1

@@ -83,8 +83,11 @@ test('a fork that changes build-pr.yml is refused, not checked on its own word',
   // Provenance from the build run, in every mode, through checked commands:
   // no pipeline whose failure reads as "not changed".
   assert.match(all.target, /build=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/actions\/runs\/\$run"\)/);
-  assert.match(all.target, /ours=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/contents\/\.github\/workflows\/build-pr\.yml\?ref=\$base" --jq \.sha\)/);
+  assert.match(all.target, /ours=\$\(blob "\$base"\)/);
+  assert.match(all.target, /theirs=\$\(blob "\$sha"\)/);
   assert.match(all.target, /\$theirs != "\$ours"/);
+  // Only a 404 means "missing"; any other error fails the job.
+  assert.match(all.target, /elif \[\[ \$out == \*"\(HTTP 404\)"\* \]\]; then\n\s+echo missing\n\s+else\n[^\n]*\n\s+return 1/);
   assert.doesNotMatch(all.target, /\| *grep -q/, 'grep -q in a pipeline fails open under pipefail');
   assert.match(all.target, /refused: \$\{\{ steps\.open\.outputs\.refused \}\}/);
   assert.match(all.dkms, /needs\.target\.outputs\.refused == ''/, 'a refused pull request runs no legs');

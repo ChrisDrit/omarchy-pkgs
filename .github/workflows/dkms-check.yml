@@ -165,11 +165,24 @@ jobs:
             echo "::error::run $run is not the pull request build of $sha"
             exit 1
           fi
-          if [[ $(jq -r '.head_repository.full_name // "" ' <<<"$build") != "$GITHUB_REPOSITORY" ]]; then
+          # build-pr.yml's blob at a commit, "missing" where it has none (a
+          # fork that branched before it existed); any other error stops here.
+          blob() {
+            local out
+            if out=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/build-pr.yml?ref=$1" --jq .sha 2>&1); then
+              echo "$out"
+            elif [[ $out == *"(HTTP 404)"* ]]; then
+              echo missing
+            else
+              echo "::error::cannot read build-pr.yml at $1" >&2
+              return 1
+            fi
+          }
+          if [[ $(jq -r '.head_repository.full_name // ""' <<<"$build") != "$GITHUB_REPOSITORY" ]]; then
             base=$(gh api "repos/$GITHUB_REPOSITORY/compare/${DEFAULT_BRANCH}...$sha" --jq .merge_base_commit.sha)
-            ours=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/build-pr.yml?ref=$base" --jq .sha)
-            theirs=$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/build-pr.yml?ref=$sha" --jq .sha 2>/dev/null || echo missing)
-            if [[ -z $ours || $theirs != "$ours" ]]; then
+            ours=$(blob "$base")
+            theirs=$(blob "$sha")
+            if [[ ! $ours =~ ^([0-9a-f]{40}|missing)$ || $theirs != "$ours" ]]; then
               refused="Not checked: this build comes from a fork whose .github/workflows/build-pr.yml differs from its merge base's, and that file writes what this check reads. Land the workflow change in a pull request of its own first."
             fi
           fi

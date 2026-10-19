@@ -150,10 +150,13 @@ To ship a change: open a PR, wait for green, merge. Nothing else is needed.
 3. **Publish.** `publish.yml` runs on every push to `master` that touches
    `pkgbuilds/**`. It finds the artifact for exactly the merged tree, signs
    it, and publishes it to every channel and architecture the package ships
-   to. When no artifact exists it builds one first, in a separate job. Its
-   last step copies `edge`'s file to `rc` or `stable` for any fast-ring
-   package either is missing. It reports in a comment on the merged PR and
-   appends to the [publish log](#read-the-publish-log).
+   to. Any run can upload an artifact under any name, so it takes one only
+   from a `build-pr.yml` run on a branch of this repository and skips the
+   rest (`bin/find-artifact` has the rule); a fork's build is never reused.
+   When no such artifact exists it builds one first, from the merged tree,
+   in a separate job. Its last step copies `edge`'s file to `rc` or `stable`
+   for any fast-ring package either is missing. It reports in a comment on
+   the merged PR and appends to the [publish log](#read-the-publish-log).
 
 Nothing else moves on its own: `rc` and `stable` change only when someone
 [promotes](#promote-a-channel) them or [cuts a release](#releases).
@@ -378,11 +381,12 @@ for a cancelled one, [check the channel](#check-that-a-version-is-live).
 
 | Value | Meaning |
 |---|---|
-| `pr-artifact` | Used an existing build artifact, from the PR or an earlier run |
+| `pr-artifact` | Used an existing build artifact from a `build-pr.yml` run on a branch of this repository, the PR's or an earlier one |
 | `rebuild` | No artifact existed; built during this run |
 | `already-published` | `edge` already held this version; nothing done |
 | `build-failed` | No artifact: the build failed, or the artifact expired |
 | `artifact-download-failed` | The artifact exists but could not be fetched or unpacked |
+| `artifact-lookup-failed` | The GitHub API failed while finding the artifact or the run that made it |
 | `built`, `native-rebuild`, `native-build-failed` | Written by earlier versions of the workflow: built during the run, or failed to |
 
 `slots[].status` is `published` or `failed`. An empty `slots` means the run
@@ -449,7 +453,8 @@ Then act on which job failed:
 |---|---|---|
 | `rebuild` | `Makepkg failed for <package>` | The recipe does not build. Fix it in a PR. Meanwhile publish the other packages of that merge: `gh workflow run publish.yml -f packages="<the healthy ones>"` |
 | `rebuild` | an error before the package build starts: the builder image, a mirror, the network | Not the recipe. Rerun: `gh run rerun <run-id> --failed` |
-| `publish`, step "Collect artifacts" | `no artifact from the rebuild job` | Either that package's build failed (see the `rebuild` job), or its artifact expired mid-run. For the second, rerun every job: `gh run rerun <run-id>` |
+| `publish`, step "Collect artifacts" | `no artifact from the rebuild job or a build that can vouch for it` | Either that package's build failed (see the `rebuild` job), or its artifact expired mid-run. For the second, rerun every job: `gh run rerun <run-id>`. Lines ending `cannot vouch for it` name artifacts another run uploaded under the package's name; they are never published |
+| `publish`, step "Collect artifacts" | `cannot tell which run uploaded its artifacts` | The GitHub API failed. Rerun: `gh run rerun <run-id> --failed`. In the `changes` job the same message is a warning, and the package is rebuilt |
 | `publish`, step "Collect artifacts" | the artifact could not be downloaded or unpacked | Rerun: `gh run rerun <run-id> --failed`. If it fails again the artifact is bad: bump `pkgrel` in a PR to get a fresh build |
 | `publish`, step "Publish" | `Already published with DIFFERENT bytes, refusing to overwrite` | That version is already out with other contents. Bump `pkgrel` in a PR |
 | `publish`, step "Publish" | `its artifact has no files with pkgbase <base>` | The build produced packages under another pkgbase than the recipe declares. Fix the recipe's `pkgbase`/`pkgname` in a PR |

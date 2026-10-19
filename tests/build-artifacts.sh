@@ -214,7 +214,7 @@ echo "{\"merge_base_commit\": {\"sha\": \"$base_sha\"}}" >"$tmp/gh/compare/$fork
 reuse() { # reuse <label> <artifact id:run id>...: the label's artifacts, newest first
   local pair list='[]' n=0
   for pair in "${@:2}"; do
-    list=$(jq -c --arg l "$1" --argjson a "${pair%%:*}" --argjson r "${pair#*:}" --arg t "$(printf '2026-10-18T10:%02d:00Z' $((59 - n)))" \
+    list=$(jq -c --arg l "$1" --argjson a "${pair%%:*}" --argjson r "${pair#*:}" --arg t "$(printf '2026-10-18T%02d:%02d:00Z' $((11 - n / 60)) $((59 - n % 60)))" \
       '. + [{name: $l, id: $a, expired: false, created_at: $t, workflow_run: {id: $r}}]' <<<"$list")
     n=$((n + 1))
   done
@@ -243,9 +243,10 @@ DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q '^xpadneo-dkms
 rm "$tmp/gh/blob/$base_sha.json" "$tmp/gh/blob/$fork_sha.json"
 DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q '^xpadneo-dkms-0.9.8-1-any.pkg.tar.zst$' <(ls "$tmp/out") &&
   pass "a fork that branched before build-pr.yml existed is trusted (missing at both ends)" || fail "fork missing: $(cat "$tmp/stderr")"
-# However many untrusted artifacts come first, every page is read.
+# However many untrusted artifacts come first, every page is read: 120 of
+# them fill more than the 100 a page holds.
 pairs=()
-for _ in $(seq 1 25); do pairs+=("18:601"); done
+for _ in $(seq 1 120); do pairs+=("18:601"); done
 reuse "$r" "${pairs[@]}" 12:501
 echo '{"sha": "aaaa000000000000000000000000000000000001"}' >"$tmp/gh/blob/$base_sha.json"
 echo '{"sha": "bbbb000000000000000000000000000000000002"}' >"$tmp/gh/blob/$fork_sha.json"

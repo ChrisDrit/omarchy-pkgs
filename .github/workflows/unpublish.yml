@@ -43,6 +43,8 @@ jobs:
         env:
           PACKAGES: ${{ github.event.inputs.packages }}
           CHANNELS: ${{ github.event.inputs.channels }}
+          # The plan reads the databases the Unpublish step will change.
+          OMARCHY_PUBLISH_PREFIX: ${{ vars.OMARCHY_PUBLISH_PREFIX }}
         run: |
           set -euo pipefail
           bin/unpublish-plan --channels "$CHANNELS" $PACKAGES >>"$GITHUB_ENV"

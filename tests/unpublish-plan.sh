@@ -19,7 +19,23 @@ recipe arm-only "aarch64"
 recipe icon-theme "any"
 sed -i 's/^pkgname=icon-theme$/pkgbase=icons\npkgname=(icons-light icons-dark)/' "$T/pkgbuilds/icon-theme/PKGBUILD"
 
-plan() { OMARCHY_PKGBUILDS="$T/pkgbuilds" "$ROOT/bin/unpublish-plan" "$@" 2>"$T/err"; }
+# The channel databases the plan reads names from, served over file://.
+entry() { # entry <channel>/<arch> <name> <pkgbase>
+  mkdir -p "$T/db/$1/$2-1-1"
+  printf '%%NAME%%\n%s\n\n%%BASE%%\n%s\n\n%%VERSION%%\n1-1\n' "$2" "$3" > "$T/db/$1/$2-1-1/desc"
+}
+publish() {
+  local c a
+  for c in edge rc stable; do
+    for a in x86_64 aarch64; do
+      mkdir -p "$T/db/$c/$a" "$T/remote/$c/$a"
+      tar --zstd -cf "$T/remote/$c/$a/omarchy.db" -C "$T/db/$c/$a" .
+    done
+  done
+}
+publish
+
+plan() { OMARCHY_PKGBUILDS="$T/pkgbuilds" OMARCHY_PUBLISHED_REPO_URL="file://$T/remote" "$ROOT/bin/unpublish-plan" "$@" 2>"$T/err"; }
 line() { grep "^$1=" <<<"$out" | cut -d= -f2-; }
 
 out=$(plan --channels "edge rc stable" edge-only) || fail "edge-only refused: $(cat "$T/err")"
@@ -51,6 +67,68 @@ done
 pass "a name makepkg refuses is refused"
 plan --channels >/dev/null && fail "a bare --channels was accepted"
 pass "a bare --channels is refused"
+
+# Only what recipes build counts. A package renamed in its own directory
+# leaves its old pkgbase to be retired...
+recipe renamed "x86_64 aarch64"
+sed -i 's/^pkgname=renamed$/pkgname=new-name/' "$T/pkgbuilds/renamed/PKGBUILD"
+out=$(plan --channels "stable" renamed) || fail "an old pkgbase was kept by its directory's name: $(cat "$T/err")"
+[[ $(line RETIRE_STABLE_X86_64) == renamed && $(line RETIRE_STABLE_AARCH64) == renamed ]] &&
+  pass "a pkgbase its directory no longer builds is retired" || fail "renamed plan: $out"
+plan --channels "stable" new-name >/dev/null && fail "the new pkgbase was not kept"
+pass "and the pkgbase it builds now is kept"
+rm -r "$T/pkgbuilds/renamed"
+
+# ...while packages still built under another pkgbase stay until a publish
+# or a promotion replaces them by name.
+recipe keep "x86_64 aarch64"
+sed -i '1i pkgbase=keep-meta' "$T/pkgbuilds/keep/PKGBUILD"
+plan --channels "edge rc stable" keep >/dev/null && fail "a pkgbase whose package is still built under another pkgbase was retired"
+pass "a pkgbase whose package a recipe still builds under another pkgbase is kept"
+rm -r "$T/pkgbuilds/keep"
+
+recipe suite-v2 "x86_64 aarch64"
+sed -i 's/^pkgname=suite-v2$/pkgname=(suite-a suite-b)/' "$T/pkgbuilds/suite-v2/PKGBUILD"
+for slot in stable/x86_64 stable/aarch64; do entry "$slot" suite-a suite; entry "$slot" suite-b suite; done
+publish
+plan --channels "stable" suite >/dev/null && fail "split packages still built under another pkgbase were retired: $(cat "$T/err")"
+pass "split packages the channel holds and a recipe still builds are kept, by the names the channel holds"
+rm -r "$T/pkgbuilds/suite-v2" "$T/db/stable/x86_64/"suite-* "$T/db/stable/aarch64/"suite-*
+publish
+
+recipe kern "x86_64"
+sed -i 's/^pkgname=kern$/pkgname=(kern kern-headers)/' "$T/pkgbuilds/kern/PKGBUILD"
+recipe kern-arm "aarch64"
+sed -i 's/^pkgname=kern-arm$/pkgbase=kern-arm\npkgname=(kern kern-headers)/' "$T/pkgbuilds/kern-arm/PKGBUILD"
+entry edge/aarch64 kern kern
+entry edge/aarch64 kern-headers kern
+publish
+plan --channels "edge" kern >/dev/null && fail "packages another recipe builds for aarch64 were retired: $(cat "$T/err")"
+grep -q "Keeping kern in edge/aarch64: pkgbuilds/kern-arm" "$T/err" &&
+  pass "a recipe that no longer builds an architecture does not hide one that builds its packages there" || fail "message: $(cat "$T/err")"
+rm -r "$T/pkgbuilds/kern" "$T/pkgbuilds/kern-arm" "$T/db/edge/aarch64/"kern*
+publish
+
+recipe everywhere-arm "aarch64"
+sed -i 's/^pkgname=everywhere-arm$/pkgname=everywhere/' "$T/pkgbuilds/everywhere-arm/PKGBUILD"
+recipe everywhere "x86_64"
+plan --channels "stable" everywhere >/dev/null && fail "a pkgbase two recipes build on different architectures was retired: $(cat "$T/err")"
+grep -q "Keeping everywhere in stable/aarch64: pkgbuilds/everywhere-arm" "$T/err" &&
+  pass "two recipes may share a pkgbase on different architectures" || fail "message: $(cat "$T/err")"
+rm -r "$T/pkgbuilds/everywhere-arm"
+recipe everywhere "x86_64 aarch64"
+
+recipe everywhere-too "x86_64 aarch64"
+sed -i 's/^pkgname=everywhere-too$/pkgname=everywhere/' "$T/pkgbuilds/everywhere-too/PKGBUILD"
+plan --channels "stable" gone >/dev/null && fail "a plan was made although two recipes build one pkgbase"
+grep -q "both build pkgbase everywhere" "$T/err" && pass "two recipes building one pkgbase stop the plan" || fail "message: $(cat "$T/err")"
+rm -r "$T/pkgbuilds/everywhere-too"
+
+mv "$T/remote/rc/aarch64/omarchy.db" "$T/rc-aarch64.db"
+plan --channels "rc" gone >/dev/null && fail "a plan was made without the rc aarch64 database"
+grep -q "Could not read file://$T/remote/rc/aarch64/omarchy.db" "$T/err" &&
+  pass "a database that can't be read stops the plan" || fail "message: $(cat "$T/err")"
+mv "$T/rc-aarch64.db" "$T/remote/rc/aarch64/omarchy.db"
 
 # Every recipe has to be read in full before anything is planned: one left
 # out of the lookup reads as gone, and its live packages would be retired.

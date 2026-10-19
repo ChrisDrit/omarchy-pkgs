@@ -59,15 +59,18 @@ done
 
 # drift <pkgbuilds dir>: one "<channel> <arch> <pkgbase> <why>" line, tab
 # separated, for every pkgbase a database holds where no recipe in that
-# directory publishes it. Fails when a recipe there cannot be read, which
-# would otherwise read as gone. The helpers read PKGBUILDS_DIR, so the local
-# one is theirs for the call.
+# directory publishes it or any of its packages. Fails when a recipe there
+# cannot be read, which would otherwise read as gone. The helpers read
+# PKGBUILDS_DIR, so the local one is theirs for the call.
 drift() {
-  local PKGBUILDS_DIR=$1 c a b why
+  local PKGBUILDS_DIR=$1 c a b why held
+  local -a names
   package_index_pkgbases "${ARCHES[@]}" || return 1
-  cut -f1-3 "$WORK/entries.tsv" | LC_ALL=C sort -u | while IFS=$'\t' read -r c a b; do
-    why=$(package_pkgbase_publisher "$b" "$c" "$a") || printf '%s\t%s\t%s\t%s\n' "$c" "$a" "$b" "$why"
-  done
+  awk -F'\t' '{ k = $1 "\t" $2 "\t" $3; held[k] = held[k] " " $4 } END { for (k in held) print k "\t" held[k] }' "$WORK/entries.tsv" |
+    LC_ALL=C sort | while IFS=$'\t' read -r c a b held; do
+      read -ra names <<<"$held"
+      why=$(package_pkgbase_publisher "$b" "$c" "$a" "${names[@]}") || printf '%s\t%s\t%s\t%s\n' "$c" "$a" "$b" "$why"
+    done
 }
 
 drift "$PKGBUILDS_DIR" > "$WORK/drift.tsv" || exit 2

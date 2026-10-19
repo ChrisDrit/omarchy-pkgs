@@ -334,16 +334,21 @@ package_dirs() {
 # package_index_pkgbases <arch>... reads every recipe in full and fills
 # PKGBASE_RECIPE["<arch>/<pkgbase>"] with the recipe that builds that pkgbase
 # there, which is not always its directory's name (pkgbuilds/yaru-icon-theme
-# builds yaru). A recipe left out would read as gone, so it fails, and
-# nothing should be decided, when a directory under pkgbuilds/ has no
-# PKGBUILD or no .omarchy/package.json, a recipe's channels can't be read, a
-# PKGBUILD fails to source (package_pkgbase would fall back to the
-# directory's name), or there are no recipes at all. The glob runs in this
-# shell, so nothing can fail unseen in a pipeline.
+# builds yaru), and PKGNAME_RECIPES["<arch>/<pkgname>"] with every recipe
+# that builds a package of that name (linux-omarchy and linux-omarchy-aarch64
+# both build linux-omarchy). A recipe left out, or matched wrongly, would
+# read as gone, so it fails, and nothing should be decided, when a directory
+# under pkgbuilds/ has no PKGBUILD or no .omarchy/package.json, a recipe's
+# channels can't be read, a PKGBUILD fails to source or stops before naming
+# a pkgbase (package_pkgbase would fall back to the directory's name), two
+# recipes that both build for an architecture build one pkgbase there, or
+# there are no recipes at all. The glob runs in this shell, so nothing can
+# fail unseen in a pipeline.
 package_index_pkgbases() {
-  local arch pkgdir base
-  local -a recipes=()
-  declare -gA PKGBASE_RECIPE=()
+  local arch pkgdir built name other
+  local -a recipes=() lines
+  local -A builds_here=()
+  declare -gA PKGBASE_RECIPE=() PKGNAME_RECIPES=()
   for pkgdir in "$PKGBUILDS_DIR"/*/; do
     pkgdir=${pkgdir%/}
     [[ -d $pkgdir ]] || continue
@@ -365,43 +370,73 @@ package_index_pkgbases() {
   fi
   for arch in "$@"; do
     for pkgdir in "${recipes[@]}"; do
-      # A PKGBUILD can also stop early with success (exit 0) and say nothing.
-      if ! base=$(cd "$pkgdir" && env -u OMARCHY_SRC CARCH="$arch" bash -c '
+      # The pkgbase, the architectures and the package names, read the way
+      # makepkg reads them for this architecture. A PKGBUILD can also stop
+      # early with success (exit 0) and say nothing.
+      if ! built=$(cd "$pkgdir" && env -u OMARCHY_SRC CARCH="$arch" bash -c '
         source PKGBUILD >/dev/null 2>&1 || exit 1
         base=${pkgbase:-${pkgname[0]:-}}
-        [[ -n $base ]] && printf "%s\n" "$base"
-      ') || [[ -z $base ]]; then
+        [[ -n $base ]] && printf "%s\n" "$base" "${arch[*]}" "${pkgname[@]}"
+      ') || [[ -z $built ]]; then
         echo "::error::Cannot read pkgbuilds/${pkgdir##*/}/PKGBUILD for $arch" >&2
         return 1
       fi
-      PKGBASE_RECIPE[$arch/$base]=$pkgdir
+      mapfile -t lines <<<"$built"
+      builds_here[$pkgdir]=0
+      [[ " ${lines[1]} " != *" any "* && " ${lines[1]} " != *" $arch "* ]] || builds_here[$pkgdir]=1
+      # Two recipes may share a pkgbase across architectures (one per
+      # architecture); within one, the pkgbase is the one that builds there.
+      other=${PKGBASE_RECIPE[$arch/${lines[0]}]:-}
+      if [[ -z $other ]] || (( builds_here[$pkgdir] && ! builds_here[$other] )); then
+        PKGBASE_RECIPE[$arch/${lines[0]}]=$pkgdir
+      elif (( builds_here[$pkgdir] && builds_here[$other] )); then
+        echo "::error::pkgbuilds/${other##*/} and pkgbuilds/${pkgdir##*/} both build pkgbase ${lines[0]} for $arch" >&2
+        return 1
+      fi
+      for name in "${lines[@]:2}"; do
+        PKGNAME_RECIPES[$arch/$name]+="$pkgdir"$'\n'
+      done
     done
   done
 }
 
-# package_pkgbase_publisher <pkgbase> <channel> <arch> prints the recipe that
-# publishes the pkgbase to that channel and architecture. When none does, it
-# prints why and fails: no recipe builds it, its recipe no longer builds for
-# that architecture (pinta is aarch64-only), or its channels leave that
+# package_pkgbase_publisher <pkgbase> <channel> <arch> [<pkgname>...] prints
+# the recipe that publishes the pkgbase, or one of its packages, to that
+# channel and architecture. Only what recipes build counts, never a
+# directory's name. First the recipe that builds the pkgbase; failing that,
+# any recipe that publishes there and builds one of its packages (the names
+# given, by default the pkgbase itself) under another pkgbase, whose next
+# publish or promotion replaces these entries by name (old linux-omarchy
+# entries on aarch64, now built by linux-omarchy-aarch64). When none does,
+# it prints why and fails: no recipe builds it, its recipe no longer builds
+# for that architecture (pinta is aarch64-only), or its channels leave that
 # channel out (omarchy-dev is edge-only). Needs package_index_pkgbases.
 package_pkgbase_publisher() {
-  local base="$1" channel="$2" arch="$3"
-  local pkgdir=${PKGBASE_RECIPE[$arch/$base]:-}
+  local base="$1" channel="$2" arch="$3" pkgdir name why="no recipe builds it"
+  shift 3
 
-  [[ -n $pkgdir || ! -e $PKGBUILDS_DIR/$base ]] || pkgdir=$PKGBUILDS_DIR/$base
-  if [[ -z $pkgdir ]]; then
-    echo "no recipe builds it"
-    return 1
-  elif ! package_supports_arch "$pkgdir" "$arch"; then
-    echo "pkgbuilds/${pkgdir##*/} does not build for $arch"
-    return 1
-  elif ! package_in_channel "$pkgdir" "$channel"; then
-    echo "pkgbuilds/${pkgdir##*/} leaves $channel out of its channels"
-    return 1
+  pkgdir=${PKGBASE_RECIPE[$arch/$base]:-}
+  if [[ -n $pkgdir ]]; then
+    if ! package_supports_arch "$pkgdir" "$arch"; then
+      why="pkgbuilds/${pkgdir##*/} does not build for $arch"
+    elif ! package_in_channel "$pkgdir" "$channel"; then
+      why="pkgbuilds/${pkgdir##*/} leaves $channel out of its channels"
+    else
+      echo "$pkgdir"
+      return 0
+    fi
   fi
-  echo "$pkgdir"
+  for name in "${@:-$base}"; do
+    while IFS= read -r pkgdir; do
+      if [[ -n $pkgdir ]] && package_supports_arch "$pkgdir" "$arch" && package_in_channel "$pkgdir" "$channel"; then
+        echo "$pkgdir"
+        return 0
+      fi
+    done <<<"${PKGNAME_RECIPES[$arch/$name]:-}"
+  done
+  echo "$why"
+  return 1
 }
-
 
 package_has_upstream_hook() {
   local pkgdir="$1"

@@ -14,7 +14,13 @@
 #
 # A pkgbase is matched to its recipe through the pkgbase the recipe builds,
 # which is not always its directory's name (yaru-icon-theme builds yaru), as
-# promote-channel does.
+# promote-channel does, and through the packages the channel holds under it:
+# one a recipe that publishes there still builds under another pkgbase is
+# kept, since its next publish or promotion replaces the entry by name. That
+# reads each channel's database (OMARCHY_PUBLISHED_REPO_URL, default
+# https://pkgs.omarchy.org, under OMARCHY_PUBLISH_PREFIX), with the rule
+# bin/check-channel-drift applies (package_pkgbase_publisher); a database
+# that can't be read in full stops the plan.
 #
 # Prints one RETIRE_<CHANNEL>_<ARCH>="<pkgbase...>" line per channel and
 # architecture, for $GITHUB_ENV; refusals go to stderr as GitHub errors.
@@ -22,7 +28,10 @@
 set -euo pipefail
 ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 source "$ROOT/helpers/package-metadata.sh"
+source "$ROOT/helpers/channel-db.sh"
 PKGBUILDS_DIR=${OMARCHY_PKGBUILDS:-$ROOT/pkgbuilds}
+REPO_URL=${OMARCHY_PUBLISHED_REPO_URL:-https://pkgs.omarchy.org}
+PREFIX=${OMARCHY_PUBLISH_PREFIX:-}
 ARCHES=(x86_64 aarch64)
 
 channels=""
@@ -39,6 +48,16 @@ done
 # gone and be retired, so nothing is planned (package_index_pkgbases).
 package_index_pkgbases "${ARCHES[@]}" || { echo "::error::Not planning anything" >&2; exit 1; }
 
+# The entries of every channel and architecture asked for.
+entries=$(mktemp)
+trap 'rm -f "$entries"' EXIT
+for c in $channels; do
+  for arch in "${ARCHES[@]}"; do
+    channel_db_entries "$REPO_URL/${PREFIX:+$PREFIX/}$c/$arch/omarchy.db" "$c" "$arch" >> "$entries" ||
+      { echo "::error::Not planning anything" >&2; exit 1; }
+  done
+done
+
 declare -A retire=()
 for p in "$@"; do
   # makepkg's rule (lint_one_pkgname): alphanumerics and +_.@-, not starting
@@ -48,7 +67,10 @@ for p in "$@"; do
   for c in $channels; do
     for arch in "${ARCHES[@]}"; do
       asked=$((asked + 1))
-      if pkgdir=$(package_pkgbase_publisher "$p" "$c" "$arch"); then
+      held=$(awk -F'\t' -v c="$c" -v a="$arch" -v b="$p" '$1 == c && $2 == a && $3 == b { print $4 }' "$entries")
+      names=()
+      [[ -z $held ]] || mapfile -t names <<<"$held"
+      if pkgdir=$(package_pkgbase_publisher "$p" "$c" "$arch" "${names[@]}"); then
         echo "Keeping $p in $c/$arch: pkgbuilds/${pkgdir##*/} still publishes it there" >&2
         kept=$((kept + 1))
       else

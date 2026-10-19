@@ -8,7 +8,7 @@
 pkgbase=linux-omarchy-aarch64
 _kernel=linux-omarchy
 pkgver=7.2.8
-pkgrel=13
+pkgrel=14
 pkgdesc='Omarchy Linux for aarch64 (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -239,6 +239,9 @@ source=(
   1084-usb-typec-ucsi-allow-retries-of-ucsi_resume_work.patch
   1085-thunderbolt-keep-the-tunnels-of-routers-kept-awake-in-system-sleep.patch
   1086-thunderbolt-space-out-the-NVIDIA-N1x-DP-tunnel-teardowns.patch
+  1087-PCI-ACPI-Mark-USB4-tunneled-devices-removable-on-every-ACPI-platform.patch
+  1088-iommu-Give-external-facing-ports-the-domain-of-untrusted-devices.patch
+  1089-thunderbolt-platform-report-IOMMU-DMA-protection-for-the-NVIDIA-N1x.patch
   1090-sspm_ci-distinguish-not-submitted-from-completion-unknown.patch
   1091-PCI-harden-MediaTek-Power-Wrap-system-sleep.patch
   1092-usb-xhci-mtk-v2-add-ACPI-power-management-support.patch
@@ -595,6 +598,9 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             '63c3741a283dcd762de5bc975b8e97aa236328de68e8fd6623bf6d7fd125c3a2'
             '1de7b523ca7fea0dcd4a4bbd5b7afd2824880ad74748e0ea83b7a83f6c74a45d'
             '8117c9060df26fc93f75c77fb8adee80697b396fd485e40461276756c205e54c'
+            'bab1a8ba58e2407fc2fd423a64c4ba95d30f6a3fa887af32471185505de58e0e'
+            '74ed8863892903452fe5117b7672d8fe32fcef3054386b472a435d4b0eef1b00'
+            '3e8bbf257870b8f6d376e984a22ec819a1c1e67de47b61d0ba35ed28b039e516'
             '8bd7382591d136f35fee515fd634767ffa8b2ec1bb28e945fdd01fac0cc1469c'
             '62f996f0d8a1723ce5aa2c73e09888ece981e6b46b4f37842022110067b712ba'
             '01b9987523cb65f53481052f3160bc595bbbb55713df3094f00a851e71bf1182'
@@ -945,6 +951,9 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         '48f5e13d1f4e23e0bac628ab6766c13ca24d38698f37934b7dfc839c5de2e3d3842d5f6c9ee4591c0b2d934b7ac882d14abe793b9d33b84d888ce7965c194208'
         'c9dac039a1a2851e5b07e98307e0b6b78c1bfc30b7e413675ed64a833f820058093f49a845a2e1908c54967b7ed231b6d9592d4e91d460101c938bdb26a1ea37'
         '623399900827bf19e84c3d3f4101e56a989882dde92cacc12153660b7c23681847ba92e215d455e40ada0cfb2b691de9017604a4f399044e4c74efaed2f291b2'
+        '6e7f15f76940756e928d9945290a74dc3ad665db4b1f2e2e91b24040f2c7cab837deae88b85879ce378689535e44f8ff9c672f974c8453520e20bf1acba0e3a6'
+        'ab10791a9f66ed43bbd00433df10b345ae4c5ed16432849ff820c0d4d7f155ef28d9f028c00ee702f4a22075f0a9c57f44297c2a683e4cd326e8e2ac59f264ee'
+        '2406f0018ba3a5ad07239b11fb43d49f3571a57a3392a59169185ea54f0a50d1f4949b7741dd25d9c97bb6e332d49a115fd0d82d88e3ded648263125f4b8f20e'
         '45b72aecaacccf061d50279f790598b22475b723184451dd1927c96471ff584b72062a3bf6e0a77c01ea297adca89154e3a30114aa6d8c32f664c90a7d8e4953'
         '856b0de2f3ce534d47cdf34c70533e6a09878c4a5972b2bd42f12a42947178a67e449798bd1ad049de48df7f01e036119578fd5fe63d460d805c6147e78051a3'
         '84afc20a730a7e94719238788db563abf8e02837e3a53814f848ce607ab42340de0c90f70eb565727a5fbc22ef254497fd08bf20286ead48b7cc175a1257eeb2'

@@ -106,10 +106,11 @@ jobs:
           [[ -z $PACKAGES ]] || args+=(--packages "$PACKAGES")
           [[ $FROM_REPOS != true ]] || args+=(--from-repos)
           [[ $ALL != true ]] || args+=(--all)
-          note=""
+          note="" legs=""
           # A pull request's build: exactly what it would publish, that run's
           # artifacts and the ones its plan reused. The legs get only the
-          # kernels and DKMS packages among them.
+          # kernels and DKMS packages among them; a build that ships nothing
+          # has none (with all, every pair on the channel still builds).
           if [[ -n $BUILD_RUN ]]; then
             if [[ ! $HEAD_SHA =~ ^[0-9a-f]{40}$ ]]; then
               echo "::error::head_sha must be a full commit hash"
@@ -119,25 +120,33 @@ jobs:
             bin/build-artifacts built "$BUILD_RUN" "$HEAD_SHA"
             if compgen -G 'built/*.pkg.tar.*' >/dev/null; then
               args+=(--local built --save-local dkms-local)
+              [[ $ALL != true ]] || note="Every pair on the channel, with this build's packages in place"
+            elif [[ $ALL == true ]]; then
+              note="Every pair on the channel; this build ships no packages"
             else
               note="This build ships no packages"
+              legs='[]'
             fi
           fi
           # Each architecture on its own, so a failure in either stops here.
-          x86_64=$(bin/check-dkms matrix --arch x86_64 "${args[@]}")
-          aarch64=$(bin/check-dkms matrix --arch aarch64 "${args[@]}")
-          legs=$(jq -cn --argjson a "$x86_64" --argjson b "$aarch64" '$a + $b')
+          if [[ -z $legs ]]; then
+            x86_64=$(bin/check-dkms matrix --arch x86_64 "${args[@]}")
+            aarch64=$(bin/check-dkms matrix --arch aarch64 "${args[@]}")
+            legs=$(jq -cn --argjson a "$x86_64" --argjson b "$aarch64" '$a + $b')
+          fi
           # Daily: a leg that built at these versions before is not built
           # again; each green leg saves its key (below, the same formula). An
           # unused cache entry expires after 7 days, so every pair is still
-          # rebuilt weekly, on whatever toolchain edge has by then.
+          # rebuilt weekly, on whatever toolchain edge has by then. Only this
+          # ref's entries count: a pull request's run can save any key under
+          # its own ref, which must not skip a daily leg.
           if [[ $GITHUB_EVENT_NAME == schedule ]]; then
             keep='[]'
             while IFS= read -r leg; do
               key=$(jq -r --arg c "$CHANNEL" --arg t "${TOOLING:0:16}" \
                 '"dkms-\($c)-\(.arch)-\(.kernel | gsub(" "; "_"))-\(.module | gsub(" "; "_"))-\($t)"' <<<"$leg")
-              hits=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key" |
-                jq --arg k "$key" '[.actions_caches[] | select(.key == $k)] | length')
+              hits=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$key" -f ref="$GITHUB_REF" |
+                jq --arg k "$key" --arg r "$GITHUB_REF" '[.actions_caches[] | select(.key == $k and .ref == $r)] | length')
               if ((hits)); then
                 echo "built before: $key"
               else

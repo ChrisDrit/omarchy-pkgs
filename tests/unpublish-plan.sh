@@ -46,6 +46,40 @@ pass "a bad package name is refused"
 plan --channels >/dev/null && fail "a bare --channels was accepted"
 pass "a bare --channels is refused"
 
+# Every recipe has to be read in full before anything is planned: one left
+# out of the lookup reads as gone, and its live packages would be retired.
+rm "$T/pkgbuilds/icon-theme/.omarchy/package.json"
+plan --channels "stable" icons >/dev/null && fail "a recipe without .omarchy/package.json read as gone: $(cat "$T/err")"
+grep -q "pkgbuilds/icon-theme has no .omarchy/package.json" "$T/err" && pass "a recipe without metadata stops the plan" || fail "message: $(cat "$T/err")"
+echo '{"source": "local"}' > "$T/pkgbuilds/icon-theme/.omarchy/package.json"
+
+mv "$T/pkgbuilds/everywhere/PKGBUILD" "$T/PKGBUILD.everywhere"
+plan --channels "stable" everywhere >/dev/null && fail "a recipe without a PKGBUILD read as gone: $(cat "$T/err")"
+grep -q "pkgbuilds/everywhere has no PKGBUILD" "$T/err" && pass "a recipe directory without a PKGBUILD stops the plan" || fail "message: $(cat "$T/err")"
+mv "$T/PKGBUILD.everywhere" "$T/pkgbuilds/everywhere/PKGBUILD"
+
+for metadata in '{"source": "local", "channels": "edge"}' '{"source": "local", "channels": [' '{"channels": "edge"} {}'; do
+  echo "$metadata" > "$T/pkgbuilds/everywhere/.omarchy/package.json"
+  plan --channels "stable" everywhere >/dev/null && fail "channels that can't be read decided a retirement: $metadata"
+  grep -q "Cannot read the channels of pkgbuilds/everywhere" "$T/err" || fail "message for $metadata: $(cat "$T/err")"
+done
+pass "channels that can't be read stop the plan"
+echo '{"source": "local"}' > "$T/pkgbuilds/everywhere/.omarchy/package.json"
+
+for root in "$T/nowhere" "$T/empty"; do
+  mkdir -p "$T/empty"
+  OMARCHY_PKGBUILDS="$root" "$ROOT/bin/unpublish-plan" --channels "stable" everywhere >/dev/null 2>"$T/err" &&
+    fail "a plan was made from $root"
+  grep -q "No recipes in $root" "$T/err" || fail "message for $root: $(cat "$T/err")"
+done
+pass "a missing or empty recipe directory stops the plan"
+
+recipe quits "x86_64 aarch64"
+sed -i '1i exit 0' "$T/pkgbuilds/quits/PKGBUILD"
+plan --channels "stable" gone >/dev/null && fail "a plan was made although a PKGBUILD stopped before saying what it builds"
+grep -q "Cannot read pkgbuilds/quits/PKGBUILD" "$T/err" && pass "a PKGBUILD that exits early with success stops the plan" || fail "message: $(cat "$T/err")"
+rm -r "$T/pkgbuilds/quits"
+
 recipe broken "x86_64 aarch64"
 sed -i '1i return 1' "$T/pkgbuilds/broken/PKGBUILD"
 plan --channels "stable" gone >/dev/null && fail "a plan was made although a PKGBUILD could not be read"

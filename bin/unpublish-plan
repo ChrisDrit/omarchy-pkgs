@@ -46,13 +46,40 @@ recipe_pkgbase() { # recipe_pkgbase <pkgdir> <arch>
   ')
 }
 
+# Every recipe, read in full. A directory under pkgbuilds/ without a PKGBUILD
+# or .omarchy/package.json, channels that can't be read, or no recipes at all
+# stop the plan: package_dirs would skip such a recipe without a word, and it
+# would read as gone. The glob runs in this shell, so nothing can fail
+# unseen in a pipeline.
+recipes=()
+for pkgdir in "$PKGBUILDS_DIR"/*/; do
+  pkgdir=${pkgdir%/}
+  [[ -d $pkgdir ]] || continue
+  if [[ ! -f $pkgdir/PKGBUILD ]]; then
+    echo "::error::pkgbuilds/${pkgdir##*/} has no PKGBUILD; not planning anything" >&2
+    exit 1
+  elif [[ ! -f $pkgdir/.omarchy/package.json ]]; then
+    echo "::error::pkgbuilds/${pkgdir##*/} has no .omarchy/package.json; not planning anything" >&2
+    exit 1
+  elif ! package_channels_valid "$pkgdir"; then
+    echo "::error::Cannot read the channels of pkgbuilds/${pkgdir##*/}; not planning anything" >&2
+    exit 1
+  fi
+  recipes+=("$pkgdir")
+done
+(( ${#recipes[@]} )) || { echo "::error::No recipes in $PKGBUILDS_DIR; not planning anything" >&2; exit 1; }
+
 # Recipes by the pkgbase they build on each architecture.
 declare -A RECIPE=()
 for arch in "${ARCHES[@]}"; do
-  while IFS= read -r pkgdir; do
-    base=$(recipe_pkgbase "$pkgdir" "$arch") || { echo "::error::Cannot read pkgbuilds/${pkgdir##*/}/PKGBUILD for $arch; not planning anything" >&2; exit 1; }
+  for pkgdir in "${recipes[@]}"; do
+    # A PKGBUILD can also stop early with success (exit 0) and say nothing.
+    if ! base=$(recipe_pkgbase "$pkgdir" "$arch") || [[ -z $base ]]; then
+      echo "::error::Cannot read pkgbuilds/${pkgdir##*/}/PKGBUILD for $arch; not planning anything" >&2
+      exit 1
+    fi
     RECIPE[$arch/$base]=$pkgdir
-  done < <(package_dirs)
+  done
 done
 
 declare -A retire=()

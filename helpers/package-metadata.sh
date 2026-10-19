@@ -230,6 +230,25 @@ package_channels() {
   jq -r '(.channels // [])[]' "$metadata"
 }
 
+# Whether a recipe's channels can be read: its metadata is exactly one JSON
+# object, and `channels`, when present, is a non-empty array of unique
+# edge/rc/stable values. package_in_channel reads anything else as a
+# membership answer (unparseable metadata as every channel, "channels":
+# "edge" as none). Slurped, because jq -e answers for the last of several
+# documents only.
+package_channels_valid() {
+  local metadata
+  metadata=$(metadata_file_for_dir "$1")
+  jq -e -s '
+    length == 1 and (.[0] | type == "object") and (.[0] |
+      if has("channels") | not then true
+      else .channels | type == "array" and length > 0
+        and all(. == "edge" or . == "rc" or . == "stable")
+        and (unique | length) == length
+      end)
+  ' "$metadata" >/dev/null 2>&1
+}
+
 package_in_channel() {
   local pkgdir="$1" channel="$2"
   package_has_channels "$pkgdir" || return 0
@@ -512,13 +531,7 @@ validate_package_metadata() {
     return 1
   fi
 
-  if ! jq -e '
-    if has("channels") | not then true
-    else .channels | type == "array" and length > 0
-      and all(. == "edge" or . == "rc" or . == "stable")
-      and (unique | length) == length
-    end
-  ' "$metadata" >/dev/null; then
+  if ! package_channels_valid "$pkgdir"; then
     echo "invalid channels for $(basename "$pkgdir"): must be a non-empty array of unique edge/rc/stable values"
     return 1
   fi

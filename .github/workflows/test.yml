@@ -38,6 +38,9 @@ jobs:
       - name: Test upstream sync reporting
         run: node --test tests/sync-upstream-summary.cjs
 
+      - name: Test the DKMS check's workflows
+        run: node --test tests/dkms-check-workflow.cjs
+
       - name: Test builder images
         run: node --test tests/builder-image.cjs
 

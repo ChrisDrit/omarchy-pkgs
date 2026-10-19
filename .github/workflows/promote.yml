@@ -40,11 +40,11 @@ jobs:
   # first (bin/check-dkms): a kernel that breaks an out-of-tree module, or a
   # module that no longer builds, stops here instead of reaching the channel.
   dkms:
-    # dkms-check.yml reads Actions data in its other modes, so it asks for it.
+    # dkms-matrix.yml reads Actions data in its other modes, so it asks for it.
     permissions:
       contents: read
       actions: read
-    uses: ./.github/workflows/dkms-check.yml
+    uses: ./.github/workflows/dkms-matrix.yml
     with:
       channel: ${{ startsWith(github.event.inputs.direction, 'edge') && 'edge' || 'rc' }}
       since: ${{ startsWith(github.event.inputs.direction, 'edge') && 'rc' || 'stable' }}

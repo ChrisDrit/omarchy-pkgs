@@ -1,9 +1,10 @@
 #!/bin/bash
 # Self-test for bin/build-artifacts: what a pull request build would publish,
-# for the DKMS check. A planned package with no artifact in the run built
-# nothing (edge already holds it); a reused artifact must still exist; a
-# download, extraction or copy that fails, or an artifact with no package,
-# fails the collection. gh is a stub that answers from fixtures.
+# for the DKMS check, as the build's dkms-request artifact records it. A
+# planned package with no artifact in the run built nothing (edge already
+# holds it); a reused artifact must still exist; a download, extraction or
+# copy that fails, an artifact with no package, or a missing or malformed
+# request fails the collection. gh is a stub that answers from fixtures.
 set -euo pipefail
 ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 pass() { echo "PASS: $1"; }
@@ -77,9 +78,18 @@ run_json() { # run_json <run> <name=id>...: a run's artifact listing
 matrix() { # matrix <package:arch>...
   printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0) | split(":") | {package: .[0], arch: .[1]}) | {include: .}'
 }
-collect() { # collect <run> <matrix> <reused json>
+request() { # request <run> <request json>: the run's dkms-request artifact, replacing any
+  mkdir -p "$tmp/req$1"
+  printf '%s\n' "$2" >"$tmp/req$1/dkms-request.json"
+  (cd "$tmp/req$1" && bsdtar -a -cf "$tmp/gh/artifacts/90$1.zip" dkms-request.json)
+  [[ -f $tmp/gh/runs/$1.json ]] || echo '{"artifacts": []}' >"$tmp/gh/runs/$1.json"
+  jq --argjson i "90$1" '.artifacts = [.artifacts[] | select(.name != "dkms-request")] + [{name: "dkms-request", id: $i, expired: false}]' \
+    "$tmp/gh/runs/$1.json" >"$tmp/listing" && mv "$tmp/listing" "$tmp/gh/runs/$1.json"
+}
+collect() { # collect <run> <matrix> <reused json> [trusted]
   rm -rf "$tmp/out"
-  (cd "$tmp/repo" && "$ROOT/bin/build-artifacts" "$tmp/out" "$1" "$2" "$3" "$head") >"$tmp/stdout" 2>"$tmp/stderr"
+  request "$1" "$(jq -n --argjson m "$2" --argjson r "$3" --argjson t "${4:-true}" '{trusted: $t, matrix: $m, reused: $r}')"
+  (cd "$tmp/repo" && "$ROOT/bin/build-artifacts" "$tmp/out" "$1" "$head") >"$tmp/stdout" 2>"$tmp/stderr"
 }
 outfiles() { ls "$tmp/out" 2>/dev/null | sort | tr '\n' ' '; }
 
@@ -115,7 +125,7 @@ run_json 3 "$k=14"
 run_json 4 "$k=404"
 ! collect 4 "$(matrix linux-omarchy:x86_64)" '[]' && grep -q "cannot download artifact $k" "$tmp/stderr" &&
   pass "a download that fails fails the collection" || fail "download: $(cat "$tmp/stderr")"
-! collect 5 "$(matrix linux-omarchy:x86_64)" '[]' && grep -q "cannot list run 5's artifacts" "$tmp/stderr" &&
+! (cd "$tmp/repo" && "$ROOT/bin/build-artifacts" "$tmp/out" 5 "$head") 2>"$tmp/stderr" && grep -q "cannot list run 5's artifacts" "$tmp/stderr" &&
   pass "a run whose artifacts cannot be listed fails" || fail "listing: $(cat "$tmp/stderr")"
 ! collect 1 "$(matrix no-such-recipe:x86_64)" '[]' && grep -q "no pkgbuilds/no-such-recipe at $head" "$tmp/stderr" &&
   pass "a planned package missing from the head fails" || fail "recipe: $(cat "$tmp/stderr")"
@@ -124,8 +134,25 @@ run_json 4 "$k=404"
 mkdir -p "$tmp/ro"
 chmod a-w "$tmp/ro"
 if [[ $(id -u) != 0 ]]; then
-  ! (cd "$tmp/repo" && "$ROOT/bin/build-artifacts" "$tmp/ro" 1 "$(matrix linux-omarchy:x86_64)" '[]' "$head") 2>"$tmp/stderr" &&
+  request 1 "$(jq -n --argjson m "$(matrix linux-omarchy:x86_64)" '{trusted: true, matrix: $m, reused: []}')"
+  ! (cd "$tmp/repo" && "$ROOT/bin/build-artifacts" "$tmp/ro" 1 "$head") 2>"$tmp/stderr" &&
     grep -q "cannot copy linux-omarchy-.* from artifact $k" "$tmp/stderr" &&
     pass "a package that cannot be copied fails the collection" || fail "copy: $(cat "$tmp/stderr")"
 fi
 chmod u+w "$tmp/ro"
+
+# The request: a pull request's run wrote it, so its shape is checked first.
+run_json 6 "$k=11"
+! (cd "$tmp/repo" && "$ROOT/bin/build-artifacts" "$tmp/out" 6 "$head") 2>"$tmp/stderr" && grep -q "run 6 has no dkms-request artifact" "$tmp/stderr" &&
+  pass "a run without a dkms-request fails, it does not pass as nothing built" || fail "no request: $(cat "$tmp/stderr")"
+collect 6 "$(matrix linux-omarchy:x86_64)" '[]' false && [[ -z $(outfiles) ]] && grep -q 'was not approved, so it built nothing' "$tmp/stdout" &&
+  pass "an untrusted build ships nothing" || fail "untrusted: $(outfiles) $(cat "$tmp/stderr")"
+for bad in '{"trusted": true, "matrix": {"include": [{"package": "../etc", "arch": "x86_64"}]}, "reused": []}' \
+  '{"trusted": true, "matrix": {"include": [{"package": "linux-omarchy", "arch": "x86_64?x=1"}]}, "reused": []}' \
+  '{"trusted": true, "matrix": {"include": []}, "reused": ["a&name=b-x86_64-0000000000000000000000000000000000000000"]}' \
+  '{"trusted": "yes", "matrix": {"include": []}, "reused": []}' 'not json'; do
+  request 6 "$bad"
+  if (cd "$tmp/repo" && "$ROOT/bin/build-artifacts" "$tmp/out" 6 "$head") 2>"$tmp/stderr" >/dev/null; then fail "a malformed request must fail: $bad"; fi
+  grep -q "run 6's dkms-request is malformed" "$tmp/stderr" || fail "malformed: $bad: $(cat "$tmp/stderr")"
+done
+pass "a request with a path, a query or a wrong type in it fails before it names anything"

@@ -1,23 +1,29 @@
 #!/bin/bash
-# The packages a pull request build ships, into <dest>: the artifacts this run
-# built, and the ones its plan reused from an earlier run (build-pr.yml skips a
-# package whose exact tree already has an artifact). A matrix entry with no
-# artifact in this run built nothing because edge already holds its version,
-# so nothing new ships for it. A reused artifact that cannot be found, or any
-# download or extraction error, fails: the DKMS check must see everything that
-# would publish.
+# The packages a pull request build ships, into <dest>: the artifacts that
+# run built, and the ones its plan reused from an earlier run (build-pr.yml
+# skips a package whose exact tree already has an artifact). A matrix entry
+# with no artifact in the run built nothing because edge already holds its
+# version, so nothing new ships for it. A reused artifact that cannot be
+# found, or any download or extraction error, fails: the DKMS check must see
+# everything that would publish.
 #
-# Usage: bin/build-artifacts <dest> <run id> <matrix json> <reused json> <head sha>
-#   <matrix json> is the changes job's {"include":[{"package","arch"},...]},
-#   <reused json> its array of reused labels (<package>-<arch>-<tree hash>).
+# The build records what it planned in its dkms-request artifact:
+#   {"trusted": bool, "matrix": {"include": [{"package", "arch"}, ...]},
+#    "reused": ["<package>-<arch>-<tree hash>", ...]}
+# A pull request's run wrote it, so it is data: checked against a strict
+# shape before any of it names a path or a URL. An untrusted build built
+# nothing, so it ships nothing.
+#
+# Usage: bin/build-artifacts <dest> <run id> <head sha>
 #   Needs gh (GH_TOKEN), bsdtar and GITHUB_REPOSITORY, in a checkout that has
 #   <head sha>.
 set -euo pipefail
 
 die() { echo "build-artifacts: $*" >&2; exit 2; }
-(($# == 5)) || die "usage: bin/build-artifacts <dest> <run id> <matrix json> <reused json> <head sha>"
-dest=$1 run=$2 matrix=$3 reused=$4 head=$5
+(($# == 3)) || die "usage: bin/build-artifacts <dest> <run id> <head sha>"
+dest=$1 run=$2 head=$3
 repo=${GITHUB_REPOSITORY:?build-artifacts needs GITHUB_REPOSITORY}
+[[ $run =~ ^[0-9]+$ ]] || die "run id $run is not a number"
 mkdir -p "$dest"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -49,6 +55,27 @@ fetch() { # fetch <artifact id> <label>
 # This run's artifacts, by name.
 mine=$(gh api --paginate "repos/$repo/actions/runs/$run/artifacts" --jq '.artifacts[] | select(.expired | not) | "\(.name)\t\(.id)"') ||
   die "cannot list run $run's artifacts"
+
+id=$(awk -F'\t' '$1 == "dkms-request" { print $2; exit }' <<<"$mine")
+[[ -n $id ]] || die "run $run has no dkms-request artifact; it is not a pull request build this check can read"
+gh api "repos/$repo/actions/artifacts/$id/zip" >"$work/request.zip" || die "cannot download run $run's dkms-request"
+mkdir -p "$work/request"
+bsdtar -xf "$work/request.zip" -C "$work/request" || die "cannot unzip run $run's dkms-request"
+request=$work/request/dkms-request.json
+jq -e '
+  (.trusted | type) == "boolean"
+  and (.matrix.include | type) == "array"
+  and all(.matrix.include[]; (.package | type) == "string" and (.package | test("^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*$"))
+    and (.arch == "x86_64" or .arch == "aarch64"))
+  and (.reused | type) == "array"
+  and all(.reused[]; type == "string" and test("^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*-(x86_64|aarch64)-[0-9a-f]{40}$"))' \
+  "$request" >/dev/null 2>&1 || die "run $run's dkms-request is malformed"
+if [[ $(jq -r .trusted "$request") != true ]]; then
+  echo "run $run: the build was not approved, so it built nothing"
+  exit 0
+fi
+matrix=$(jq -c .matrix "$request")
+reused=$(jq -c .reused "$request")
 
 while IFS=$'\t' read -r package arch; do
   [[ -n $package ]] || continue

@@ -43,7 +43,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.list.outputs.matrix }}
-      reused: ${{ steps.list.outputs.reused }}
       runners: ${{ steps.list.outputs.runners }}
       count: ${{ steps.gate.outputs.count }}
       trusted: ${{ steps.gate.outputs.trusted }}
@@ -187,6 +186,28 @@ jobs:
             fi
           fi
 
+      # What this build ships, for the DKMS check (dkms-check.yml). It runs
+      # after this run completes, from master's copy, and reads this as data:
+      # whether the build ran, its matrix, and the artifacts it reused.
+      - name: Record what the DKMS check reads
+        if: github.event_name == 'pull_request'
+        env:
+          MATRIX: ${{ steps.list.outputs.matrix }}
+          REUSED: ${{ steps.list.outputs.reused }}
+          TRUSTED: ${{ steps.gate.outputs.trusted }}
+        run: |
+          jq -n --argjson matrix "$MATRIX" --argjson reused "$REUSED" --arg trusted "$TRUSTED" \
+            '{trusted: ($trusted == "true"), matrix: $matrix, reused: $reused}' >dkms-request.json
+          cat dkms-request.json
+      - if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dkms-request
+          path: dkms-request.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
   build:
     needs: changes
     if: needs.changes.outputs.count != '0'
@@ -322,35 +343,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Kernels and DKMS modules from this build against the other half that edge
-  # publishes, Arch's DKMS packages included (dkms-check.yml, bin/check-dkms):
-  # a new kernel against every module, a new module against every kernel. A
-  # kernel that renames something an out-of-tree module uses, as linux-omarchy
-  # 7.2.8-9 did to the TUXEDO modules (#1244), turns `result` red here instead
-  # of on users' machines. It sees exactly what would publish: this run's
-  # artifacts and the ones the plan reused (bin/build-artifacts). Its plan
-  # reads them on the host in seconds and fans out one leg per kernel and
-  # DKMS package pair; a build with neither has no legs. Base tooling, like
-  # the build: a base branch without bin/check-dkms skips the check. Skipped
-  # entirely, as one "DKMS" check, when nothing was built or reused.
-  dkms:
-    name: DKMS
-    needs: [changes, build]
-    if: >-
-      always() && needs.changes.result == 'success' && needs.changes.outputs.trusted == 'true'
-      && (needs.build.result == 'success' || needs.build.result == 'skipped')
-      && (needs.changes.outputs.count != '0' || needs.changes.outputs.reused != '[]')
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/dkms-check.yml
-    with:
-      channel: edge
-      build_matrix: ${{ needs.changes.outputs.matrix }}
-      reused: ${{ needs.changes.outputs.reused || '[]' }}
-      head_sha: ${{ github.event.pull_request.head.sha || github.sha }}
-      tooling_ref: ${{ github.event.pull_request.base.ref || github.sha }}
-
   # `result` is required by branch protection. An unvouched author awaiting
   # approval gets a differently named informational check, leaving `result`
   # unreported (pending). Skipping or passing a job named `result` would count
@@ -358,12 +350,12 @@ jobs:
   # Actual planning/build failures and denouncements still report `result`.
   result:
     name: ${{ needs.changes.result == 'success' && needs.changes.outputs.trusted == 'false' && needs.changes.outputs.vouch_status == 'unknown' && needs.changes.outputs.empty == 'false' && 'Awaiting build approval' || 'result' }}
-    needs: [changes, build, dkms]
+    needs: [changes, build]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "trusted=${{ needs.changes.outputs.trusted }} build=${{ needs.build.result }} dkms=${{ needs.dkms.result }}"
+          echo "trusted=${{ needs.changes.outputs.trusted }} build=${{ needs.build.result }}"
           if [[ "${{ needs.changes.result }}" != "success" ]]; then
             echo "::error::Build planning or the trust check failed. See the changes job."
             exit 1
@@ -384,10 +376,3 @@ jobs:
             exit 1
           fi
           [[ "${{ needs.build.result }}" == "success" || "${{ needs.build.result }}" == "skipped" ]]
-          # The DKMS check runs only when the build shipped something; skipped is
-          # fine, anything else is not.
-          case "${{ needs.dkms.result }}" in
-            success | skipped) ;;
-            *) echo "::error::The DKMS check did not pass: a kernel or DKMS module from this build does not build. See the DKMS jobs."
-               exit 1 ;;
-          esac

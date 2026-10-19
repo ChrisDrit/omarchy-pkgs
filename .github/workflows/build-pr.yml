@@ -114,18 +114,28 @@ jobs:
           # (label <pkg>-<arch>-<tree hash>, uploaded only after a successful
           # build) is not built again. Pushing a fix for one package to a PR
           # that touches fifty rebuilds one, not fifty; publish.yml finds the
-          # same artifacts on merge. workflow_dispatch is an explicit request
-          # and always builds.
+          # same artifacts on merge. Any run can upload an artifact under any
+          # name, so only one from a build-pr.yml run on a branch of this
+          # repository counts (bin/find-artifact has the rule): a fork's pull
+          # request builds what it touches on every push, and so does a
+          # failed lookup. workflow_dispatch is an explicit
+          # request and always builds.
           if [[ "${{ github.event_name }}" == pull_request ]]; then
             head="${{ github.event.pull_request.head.sha }}"
             kept=(); reused=()
             while read -r entry; do
               package=$(jq -r .package <<<"$entry"); arch=$(jq -r .arch <<<"$entry")
               label="$package-$arch-$(git rev-parse "$head:pkgbuilds/$package")"
-              found=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/${{ github.repository }}/actions/artifacts?name=$label&per_page=5" \
-                | jq -r '[.artifacts[] | select(.expired|not)] | length' || echo 0)
-              if (( found > 0 )); then reused+=("$label"); else kept+=("$entry"); fi
+              status=0
+              bin/find-artifact "$label" >/dev/null || status=$?
+              if (( status == 0 )); then
+                reused+=("$label")
+              else
+                if (( status > 1 )); then
+                  echo "::warning::$label: cannot tell which run uploaded its artifacts; building it"
+                fi
+                kept+=("$entry")
+              fi
             done < <(jq -c '.include[]' <<<"$matrix")
             matrix=$(printf '%s\n' "${kept[@]}" | jq -sc '{include: .}')
             if (( ${#reused[@]} )); then

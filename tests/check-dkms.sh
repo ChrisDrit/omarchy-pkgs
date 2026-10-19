@@ -109,15 +109,22 @@ if check --local "$tmp/missing" >/dev/null; then fail "a missing --local must fa
 grep -q 'is not a directory' "$tmp/stderr" && pass "a missing --local is an error" || fail "missing: $(cat "$tmp/stderr")"
 # A pull request's package names reach logs and markdown: makepkg's rules only.
 package "$tmp/local-evil" 'xpadneo##[add-mask]x' 1-1 x86_64 usr/src/hid-xpadneo-1/dkms.conf
+mv "$tmp/local-evil"/*.pkg.tar.zst "$tmp/local-evil/evil-1-1-x86_64.pkg.tar.zst"
 if check --local "$tmp/local-evil" >/dev/null; then fail "a package name makepkg would not allow must fail"; fi
 grep -q 'has a package name makepkg would not allow' "$tmp/stderr" || fail "evil name: $(cat "$tmp/stderr")"
 package "$tmp/local-evil2" xpadneo-dkms '1-1 ##[x]' x86_64 usr/src/hid-xpadneo-1/dkms.conf
+mv "$tmp/local-evil2"/*.pkg.tar.zst "$tmp/local-evil2/evil-1-1-x86_64.pkg.tar.zst"
 if check --local "$tmp/local-evil2" >/dev/null; then fail "a version makepkg would not allow must fail"; fi
 grep -q 'has a version makepkg would not allow' "$tmp/stderr" || fail "evil version: $(cat "$tmp/stderr")"
 package "$tmp/local-evil3" xpadneo-dkms 1-1 x86_64 'usr/src/hid xpadneo [x]/dkms.conf'
 if check --local "$tmp/local-evil3" >/dev/null; then fail "a DKMS tree name makepkg would not allow must fail"; fi
-grep -q 'ships a kernel or DKMS tree with a name makepkg would not allow' "$tmp/stderr" &&
-  pass "a pull request's package name, version or tree outside makepkg's rules is an error" || fail "evil tree: $(cat "$tmp/stderr")"
+grep -q 'ships a kernel or DKMS tree with a name makepkg would not allow' "$tmp/stderr" ||
+  fail "evil tree: $(cat "$tmp/stderr")"
+mkdir -p "$tmp/local-evil4"
+cp "$tmp/local/tuxedo-drivers-nocompatcheck-dkms-4.22.1-3-x86_64.pkg.tar.zst" "$tmp/local-evil4/tuxedo"$'\t'"x##[add-mask]y-1-1-x86_64.pkg.tar.zst"
+if check --local "$tmp/local-evil4" >/dev/null; then fail "a package file name with a tab must fail"; fi
+grep -q 'holds a package file whose name makepkg would not produce' "$tmp/stderr" && ! grep -qF '##[' "$tmp/stderr" &&
+  pass "a pull request's package name, version, tree or file name outside makepkg's rules is an error, and not repeated" || fail "evil file: $(cat "$tmp/stderr")"
 
 # kernels= limits a module to the kernels it is installed with.
 entry scoped linux-aurora-headers 7.1.12-2 usr/lib/modules/7.1.12-2-ARCH/build/Makefile

@@ -351,6 +351,10 @@ read_local() {
   local pkg info name version parch base list role found=0
   for pkg in "$local_dir"/*.pkg.tar.*; do
     [[ -f $pkg && $pkg != *.sig ]] || continue
+    # Its path goes into tab-separated lines and logs: a name with a tab or
+    # "##[" in it is refused, and not repeated.
+    [[ ${pkg##*/} =~ ^[A-Za-z0-9@_+][A-Za-z0-9@._+:~-]*\.pkg\.tar\.[a-z0-9]+$ ]] ||
+      die "--local holds a package file whose name makepkg would not produce"
     info=$(bsdtar -xOf "$pkg" .PKGINFO) || die "cannot read $pkg"
     name=$(awk -F' = ' '$1 == "pkgname" { print $2; exit }' <<<"$info")
     version=$(awk -F' = ' '$1 == "pkgver" { print $2; exit }' <<<"$info")

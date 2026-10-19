@@ -41,12 +41,18 @@ fetch() { # fetch <artifact id> <label>
   else
     for f in "$work/$label"/*.pkg.tar.zst; do
       [[ -e $f || -L $f ]] || continue
+      [[ ${f##*/} =~ ^[A-Za-z0-9@_+][A-Za-z0-9@._+:~-]*\.pkg\.tar\.zst$ ]] ||
+        die "artifact $label holds a file whose name makepkg would not produce"
       [[ -f $f && ! -L $f ]] || die "artifact $label holds ${f##*/}, which is not a regular file"
       cp -- "$f" "$work/$label.out/" || die "cannot copy ${f##*/} from artifact $label"
     done
   fi
   for f in "$work/$label.out"/*.pkg.tar.*; do
     [[ $f != *.sig && (-e $f || -L $f) ]] || continue
+    # The name goes into logs and tab-separated plans: makepkg's names only,
+    # and an odd one is not repeated.
+    [[ ${f##*/} =~ ^[A-Za-z0-9@_+][A-Za-z0-9@._+:~-]*\.pkg\.tar\.[a-z0-9]+$ ]] ||
+      die "artifact $label holds a file whose name makepkg would not produce"
     # A link would copy whatever it points at on this runner.
     [[ -f $f && ! -L $f ]] || die "artifact $label holds ${f##*/}, which is not a regular file"
     cp -- "$f" "$dest/" || die "cannot copy ${f##*/} from artifact $label"

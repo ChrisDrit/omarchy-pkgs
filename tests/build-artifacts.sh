@@ -166,3 +166,12 @@ tar -cf "$tmp/a16/zip/packages.tar" -C "$tmp/a16" leak-1-1-x86_64.pkg.tar.zst
 run_json 7 "$k=16"
 ! collect 7 "$(matrix linux-omarchy:x86_64)" '[]' && grep -q "holds leak-1-1-x86_64.pkg.tar.zst, which is not a regular file" "$tmp/stderr" &&
   [[ -z $(outfiles) ]] && pass "a package that is a link fails, it is not followed" || fail "link: $(outfiles) $(cat "$tmp/stderr")"
+
+# A file name with a tab or "##[" would reach plans and logs.
+mkdir -p "$tmp/a17/files" "$tmp/a17/zip"
+echo x >"$tmp/a17/files/evil"$'\t'"##[add-mask]x-1-1-x86_64.pkg.tar.zst"
+tar -cf "$tmp/a17/zip/packages.tar" -C "$tmp/a17/files" .
+(cd "$tmp/a17/zip" && bsdtar -a -cf "$tmp/gh/artifacts/17.zip" packages.tar)
+run_json 8 "$k=17"
+! collect 8 "$(matrix linux-omarchy:x86_64)" '[]' && grep -q "holds a file whose name makepkg would not produce" "$tmp/stderr" &&
+  ! grep -qF '##[' "$tmp/stderr" "$tmp/stdout" && pass "a package file name outside makepkg's rules fails, and is not repeated" || fail "file name: $(cat "$tmp/stderr")"

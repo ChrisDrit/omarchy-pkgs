@@ -150,9 +150,19 @@ collect 6 "$(matrix linux-omarchy:x86_64)" '[]' false && [[ -z $(outfiles) ]] &&
 for bad in '{"trusted": true, "matrix": {"include": [{"package": "../etc", "arch": "x86_64"}]}, "reused": []}' \
   '{"trusted": true, "matrix": {"include": [{"package": "linux-omarchy", "arch": "x86_64?x=1"}]}, "reused": []}' \
   '{"trusted": true, "matrix": {"include": []}, "reused": ["a&name=b-x86_64-0000000000000000000000000000000000000000"]}' \
-  '{"trusted": "yes", "matrix": {"include": []}, "reused": []}' 'not json'; do
+  '{"trusted": "yes", "matrix": {"include": []}, "reused": []}' 'not json' \
+  '{"trusted": true, "matrix": {"include": [{"package": "linux-omarchy\n", "arch": "x86_64"}]}, "reused": []}'; do
   request 6 "$bad"
   if (cd "$tmp/repo" && "$ROOT/bin/build-artifacts" "$tmp/out" 6 "$head") 2>"$tmp/stderr" >/dev/null; then fail "a malformed request must fail: $bad"; fi
   grep -q "run 6's dkms-request is malformed" "$tmp/stderr" || fail "malformed: $bad: $(cat "$tmp/stderr")"
 done
 pass "a request with a path, a query or a wrong type in it fails before it names anything"
+
+# A package that is a link would copy whatever it points at on the runner.
+mkdir -p "$tmp/a16/zip"
+ln -s /etc/hostname "$tmp/a16/leak-1-1-x86_64.pkg.tar.zst"
+tar -cf "$tmp/a16/zip/packages.tar" -C "$tmp/a16" leak-1-1-x86_64.pkg.tar.zst
+(cd "$tmp/a16/zip" && bsdtar -a -cf "$tmp/gh/artifacts/16.zip" packages.tar)
+run_json 7 "$k=16"
+! collect 7 "$(matrix linux-omarchy:x86_64)" '[]' && grep -q "holds leak-1-1-x86_64.pkg.tar.zst, which is not a regular file" "$tmp/stderr" &&
+  [[ -z $(outfiles) ]] && pass "a package that is a link fails, it is not followed" || fail "link: $(outfiles) $(cat "$tmp/stderr")"

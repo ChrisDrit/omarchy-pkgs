@@ -7,7 +7,8 @@
 # found, or any download or extraction error, fails: the DKMS check must see
 # everything that would publish.
 #
-# The build records what it planned in its dkms-request artifact:
+# The build records what it planned in its dkms-request artifact (\A and \z,
+# not ^ and $, which in jq would let a trailing newline through):
 #   {"trusted": bool, "matrix": {"include": [{"package", "arch"}, ...]},
 #    "reused": ["<package>-<arch>-<tree hash>", ...]}
 # A pull request's run wrote it, so it is data: checked against a strict
@@ -39,12 +40,15 @@ fetch() { # fetch <artifact id> <label>
     tar -xf "$work/$label/packages.tar" -C "$work/$label.out" || die "cannot unpack artifact $label"
   else
     for f in "$work/$label"/*.pkg.tar.zst; do
-      [[ -f $f ]] || continue
+      [[ -e $f || -L $f ]] || continue
+      [[ -f $f && ! -L $f ]] || die "artifact $label holds ${f##*/}, which is not a regular file"
       cp -- "$f" "$work/$label.out/" || die "cannot copy ${f##*/} from artifact $label"
     done
   fi
   for f in "$work/$label.out"/*.pkg.tar.*; do
-    [[ -f $f && $f != *.sig ]] || continue
+    [[ $f != *.sig && (-e $f || -L $f) ]] || continue
+    # A link would copy whatever it points at on this runner.
+    [[ -f $f && ! -L $f ]] || die "artifact $label holds ${f##*/}, which is not a regular file"
     cp -- "$f" "$dest/" || die "cannot copy ${f##*/} from artifact $label"
     n=$((n + 1))
   done
@@ -65,10 +69,10 @@ request=$work/request/dkms-request.json
 jq -e '
   (.trusted | type) == "boolean"
   and (.matrix.include | type) == "array"
-  and all(.matrix.include[]; (.package | type) == "string" and (.package | test("^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*$"))
+  and all(.matrix.include[]; (.package | type) == "string" and (.package | test("\\A[A-Za-z0-9@_+][A-Za-z0-9@._+-]*\\z"))
     and (.arch == "x86_64" or .arch == "aarch64"))
   and (.reused | type) == "array"
-  and all(.reused[]; type == "string" and test("^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*-(x86_64|aarch64)-[0-9a-f]{40}$"))' \
+  and all(.reused[]; type == "string" and test("\\A[A-Za-z0-9@_+][A-Za-z0-9@._+-]*-(x86_64|aarch64)-[0-9a-f]{40}\\z"))' \
   "$request" >/dev/null 2>&1 || die "run $run's dkms-request is malformed"
 if [[ $(jq -r .trusted "$request") != true ]]; then
   echo "run $run: the build was not approved, so it built nothing"

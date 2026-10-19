@@ -247,6 +247,14 @@ jq -e '. == [{"arch": "x86_64", "kernel": "linux-omarchy-headers 7.2.8-9", "modu
 legs=$(matrix --local "$tmp/local-kernel")
 jq -e 'length == 2 and all(.kernel == "linux-omarchy-headers 7.2.9-1")' <<<"$legs" >/dev/null &&
   pass "a build with a kernel has a leg per module for it" || fail "kernel legs: $legs"
+# A package the matrix cannot read is an error, never an empty matrix.
+mkdir -p "$tmp/local-unreadable"
+echo "not an archive" >"$tmp/local-unreadable/xpadneo-dkms-1-1-x86_64.pkg.tar.zst"
+if out=$(matrix --local "$tmp/local-unreadable"); then fail "an unreadable package must fail the matrix, not give: $out"; fi
+grep -q 'cannot read' "$tmp/stderr" || fail "unreadable: $(cat "$tmp/stderr")"
+if out=$(matrix --local "$tmp/local-evil"); then fail "a package with a bad name must fail the matrix, not give: $out"; fi
+grep -q 'has a package name makepkg would not allow' "$tmp/stderr" &&
+  pass "a package the matrix cannot read or trust fails it, it is not an empty matrix" || fail "evil matrix: $(cat "$tmp/stderr")"
 [[ $(ARCH=aarch64 matrix --local "$tmp/local-kernel") == '[]' ]] &&
   pass "an architecture the build has nothing for has no legs, not an error" || fail "other arch: $(cat "$tmp/stderr")"
 if matrix --local "$tmp/local-lost" >/dev/null; then fail "a kernel that lost its tree must fail the matrix"; fi

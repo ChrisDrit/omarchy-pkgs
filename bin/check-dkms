@@ -626,7 +626,13 @@ case $mode in
   matrix)
     # The legs a CI run fans out into, each built by run --kernel --module.
     # A build with nothing for this architecture has none; nothing to download.
-    if [[ -n $local_dir && -z $(read_local) ]] && ((!all_pairs)); then
+    # Read on a line of its own: a package that cannot be read or trusted
+    # stops here, never reads as an empty build.
+    local_rows=""
+    if [[ -n $local_dir ]]; then
+      local_rows=$(read_local)
+    fi
+    if [[ -n $local_dir && -z $local_rows ]] && ((!all_pairs)); then
       echo "$arch: this build has nothing for $arch" >&2
       echo '[]'
       exit 0
@@ -651,7 +657,7 @@ case $mode in
       while IFS=$'\t' read -r kind _ _ file _; do
         [[ $kind == kernel || $kind == dkms ]] || continue
         cp -- "$file" "$save_local/" || die "cannot copy ${file##*/} to $save_local"
-      done < <(read_local)
+      done <<<"$local_rows"
     fi
     legs
     ;;

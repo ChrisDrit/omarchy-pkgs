@@ -67,3 +67,19 @@ test('a pull request build records what the DKMS check reads', () => {
   assert.match(changes, /trusted: \(\$trusted == "true"\), matrix: \$matrix, reused: \$reused/);
   assert.doesNotMatch(jobs(build).result, /dkms/, '`result` no longer waits for the DKMS check');
 });
+
+test('a build the check ignores, or one of an older commit, cannot cancel the head\'s check', () => {
+  const workflow = read('dkms-check.yml');
+  const group = workflow.split(/^concurrency:\n/m)[1].split(/^\S/m)[0];
+  assert.match(group, /format\('sha-\{0\}', github\.event\.workflow_run\.head_sha\)/, 'pull request builds are keyed by commit');
+  assert.match(group, /format\('ignored-\{0\}', github\.run_id\)/, 'ignored builds get a group of their own');
+  assert.doesNotMatch(group, /head_branch/, 'never by branch, which an older commit shares');
+});
+
+test('a fork that changes build-pr.yml is refused, not checked on its own word', () => {
+  const all = jobs(read('dkms-check.yml'));
+  assert.match(all.target, /grep -qxF \.github\/workflows\/build-pr\.yml/);
+  assert.match(all.target, /refused: \$\{\{ steps\.open\.outputs\.refused \}\}/);
+  assert.match(all.dkms, /needs\.target\.outputs\.refused == ''/, 'a refused pull request runs no legs');
+  assert.match(all.report, /CONCLUSION=failure TITLE="Not checked"/, 'and its check fails');
+});

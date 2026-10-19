@@ -95,14 +95,13 @@ test('invalid targets fail before starting an image build', t => {
 });
 
 function publish(f, extraEnv = {}) {
-  const script = workflow.split('      - name: Publish tested image\n')[1].split('        run: |\n')[1]
-    .replaceAll('${{ matrix.arch }}', 'x86_64');
+  const script = workflow.split('      - name: Publish tested image\n')[1].split('        run: |\n')[1];
   return spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], {
     cwd: f.directory, encoding: 'utf8', env: {
       ...f.env, REGISTRY_IMAGE: 'ghcr.io/omacom/omarchy-pkg-builder', CANDIDATE_IMAGE: 'candidate:test',
       GH_TOKEN: 'fixture', GH_ACTOR: 'fixture', DOCKER_CONFIG: join(f.directory, 'auth'),
       RUNNER_TEMP: f.directory, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1',
-      GITHUB_STEP_SUMMARY: join(f.directory, 'summary'), ...extraEnv,
+      GITHUB_STEP_SUMMARY: join(f.directory, 'summary'), MATRIX_ARCH: 'x86_64', ...extraEnv,
     },
   });
 }

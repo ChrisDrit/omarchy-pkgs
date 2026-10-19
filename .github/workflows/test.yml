@@ -38,6 +38,9 @@ jobs:
       - name: Test builder images
         run: node --test tests/builder-image.cjs
 
+      - name: Test that workflow scripts take values through env
+        run: node --test tests/workflow-expressions.cjs
+
       # An Arch container for vercmp: version ordering has to be decided by
       # the same comparator pacman uses on users' machines.
       - name: Run self-tests

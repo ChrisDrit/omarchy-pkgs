@@ -52,23 +52,27 @@ jobs:
         env:
           CONTAINER_ENGINE: docker
           OMARCHY_RC_PINS: "1"
+          MATRIX_ARCH: ${{ matrix.arch }}
+          PKGVER: ${{ steps.pins.outputs.pkgver }}
         run: |
           set -euo pipefail
-          plan=$(bin/build --dry-run --mirror rc --arch "${{ matrix.arch }}" --package omarchy-settings omarchy 2>&1 | grep -E '^==> Plan complete' || true)
+          plan=$(bin/build --dry-run --mirror rc --arch "$MATRIX_ARCH" --package omarchy-settings omarchy 2>&1 | grep -E '^==> Plan complete' || true)
           if [[ -n "$plan" && -z "$(sed -E 's/.*would build: *//' <<<"$plan" | tr -d '[:space:]')" ]]; then
-            echo "==> rc/${{ matrix.arch }} already serves omarchy ${{ steps.pins.outputs.pkgver }}, nothing to build"
+            echo "==> rc/$MATRIX_ARCH already serves omarchy $PKGVER, nothing to build"
             echo "built=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          bin/build --mirror rc --arch "${{ matrix.arch }}" --package omarchy-settings omarchy
+          bin/build --mirror rc --arch "$MATRIX_ARCH" --package omarchy-settings omarchy
           echo "built=true" >> "$GITHUB_OUTPUT"
       # The upload action rejects ':' in a path; the files ride inside
       # packages.tar (helpers/artifact-helpers.sh), as in build-pr.yml.
       - name: Pack artifact
         if: steps.build.outputs.built == 'true'
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
         run: |
           source helpers/artifact-helpers.sh
-          pack_packages build-output/rc/${{ matrix.arch }} packages.tar
+          pack_packages "build-output/rc/$MATRIX_ARCH" packages.tar
           tar -tvf packages.tar
       - name: Upload artifact
         if: steps.build.outputs.built == 'true'

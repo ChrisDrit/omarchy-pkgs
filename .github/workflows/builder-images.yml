@@ -53,7 +53,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Build a fresh environment
-        run: bin/builder-image build --arch "${{ matrix.arch }}" --mirror edge --tag "$CANDIDATE_IMAGE" --fresh
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: bin/builder-image build --arch "$MATRIX_ARCH" --mirror edge --tag "$CANDIDATE_IMAGE" --fresh
       - name: Test isolated package builds
         env:
           TEST_BUILDER_IMAGE: ${{ env.CANDIDATE_IMAGE }}
@@ -83,7 +85,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Build a fresh environment
-        run: bin/builder-image build --arch "${{ matrix.arch }}" --mirror edge --tag "$CANDIDATE_IMAGE" --fresh
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: bin/builder-image build --arch "$MATRIX_ARCH" --mirror edge --tag "$CANDIDATE_IMAGE" --fresh
       - name: Test isolated package builds
         env:
           TEST_BUILDER_IMAGE: ${{ env.CANDIDATE_IMAGE }}
@@ -93,12 +97,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_ACTOR: ${{ github.actor }}
           DOCKER_CONFIG: ${{ runner.temp }}/builder-registry-auth
+          MATRIX_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           mkdir -p "$DOCKER_CONFIG"
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GH_ACTOR" --password-stdin
-          key=$(bin/builder-image key --arch "${{ matrix.arch }}" --mirror edge)
+          key=$(bin/builder-image key --arch "$MATRIX_ARCH" --mirror edge)
           version="$REGISTRY_IMAGE:$key-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           docker tag "$CANDIDATE_IMAGE" "$version"
           docker push "$version"
@@ -115,4 +120,4 @@ jobs:
           docker push "$REGISTRY_IMAGE:$key"
           digest=$(docker image inspect "$version" --format '{{index .RepoDigests 0}}')
           printf '### Builder image (%s)\n\nInput key: `%s`\n\nImage: `%s`\n' \
-            "${{ matrix.arch }}" "$key" "$digest" >> "$GITHUB_STEP_SUMMARY"
+            "$MATRIX_ARCH" "$key" "$digest" >> "$GITHUB_STEP_SUMMARY"

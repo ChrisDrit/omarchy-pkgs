@@ -256,7 +256,9 @@ test('the build gate permits a missing vouch only with approval, never a denounc
 // a PR whose build never ran. GitHub keeps a missing required check pending.
 const resultJob = workflow.slice(workflow.indexOf('\n  result:\n'));
 const resultName = resultJob.match(/^    name: (.+)$/m)[1];
-const resultScript = resultJob.split('      - run: |\n')[1];
+// The step takes every value through env: render those, run the script.
+const [resultEnvText, resultScript] = resultJob.split('    steps:\n')[1].split('        run: |\n');
+const resultEnv = [...resultEnvText.matchAll(/^          ([A-Z_]+): (.+)$/gm)].map(([, name, value]) => [name, value]);
 function report({ trusted = 'false', vouch = 'unknown', empty = 'false', changes = 'success', build = 'skipped' } = {}) {
   const needs = {
     changes: { result: changes, outputs: { trusted, vouch_status: vouch, empty } },
@@ -269,8 +271,9 @@ function report({ trusted = 'false', vouch = 'unknown', empty = 'false', changes
   const directory = mkdtempSync(join(tmpdir(), 'build-approval-report-'));
   const summaryPath = join(directory, 'summary');
   try {
-    const result = spawnSync('bash', ['-e', '-c', render(resultScript)], {
-      env: { ...process.env, GITHUB_STEP_SUMMARY: summaryPath }, encoding: 'utf8',
+    const env = Object.fromEntries(resultEnv.map(([name, value]) => [name, String(render(value))]));
+    const result = spawnSync('bash', ['-e', '-c', resultScript], {
+      env: { ...process.env, ...env, GITHUB_STEP_SUMMARY: summaryPath }, encoding: 'utf8',
     });
     return { name: render(resultName), ...result,
       summary: result.stdout.includes('::notice::') ? readFileSync(summaryPath, 'utf8') : '' };

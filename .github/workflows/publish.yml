@@ -42,18 +42,24 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # Values reach the shell through env, never pasted into the script.
       - id: list
         env:
           GH_TOKEN: ${{ github.token }}
+          DISPATCH_PACKAGES: ${{ github.event.inputs.packages }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          if [[ -n "${{ github.event.inputs.packages }}" ]]; then
-            names="${{ github.event.inputs.packages }}"
+          if [[ -n $DISPATCH_PACKAGES ]]; then
+            # Separated by spaces in the dispatch form, one to a line here.
+            names=$(tr -s '[:space:]' '\n' <<<"$DISPATCH_PACKAGES")
           else
-            names=$(git diff --name-only "${{ github.event.before }}..${{ github.sha }}" -- pkgbuilds \
+            names=$(git diff --name-only "$BEFORE..$GITHUB_SHA" -- pkgbuilds \
               | awk -F/ '$1=="pkgbuilds" && NF>2 {print $2}' | sort -u)
           fi
-          matrix=$(printf '%s\n' $names | bin/build-matrix)
+          # One name to a line, as given: bin/build-matrix refuses any name
+          # makepkg would, and the shell neither splits nor globs one first.
+          matrix=$(bin/build-matrix <<<"$names")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "count=$(jq '.include | length' <<<"$matrix")" >> "$GITHUB_OUTPUT"
           jq -r '.include[] | "\(.package) \(.arch) -> \(.channels)"' <<<"$matrix"
@@ -121,24 +127,29 @@ jobs:
         id: build
         env:
           CONTAINER_ENGINE: docker
+          MATRIX_ARCH: ${{ matrix.arch }}
+          MATRIX_PACKAGE: ${{ matrix.package }}
         run: |
           set -euo pipefail
-          plan=$(bin/build --dry-run --mirror edge --arch "${{ matrix.arch }}" --package "${{ matrix.package }}" 2>&1 | grep -E '^==> Plan complete' || true)
+          plan=$(bin/build --dry-run --mirror edge --arch "$MATRIX_ARCH" --package "$MATRIX_PACKAGE" 2>&1 | grep -E '^==> Plan complete' || true)
           if [[ -n "$plan" && -z "$(sed -E 's/.*would build: *//' <<<"$plan" | tr -d '[:space:]')" ]]; then
-            echo "==> ${{ matrix.package }} (${{ matrix.arch }}): already published at master's version, nothing to build"
+            echo "==> $MATRIX_PACKAGE ($MATRIX_ARCH): already published at master's version, nothing to build"
             echo "built=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          bin/build --mirror edge --arch "${{ matrix.arch }}" --package "${{ matrix.package }}"
+          bin/build --mirror edge --arch "$MATRIX_ARCH" --package "$MATRIX_PACKAGE"
           echo "built=true" >> "$GITHUB_OUTPUT"
       - name: Pack artifact
         if: steps.build.outputs.built == 'true'
         id: pack
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+          MATRIX_PACKAGE: ${{ matrix.package }}
         run: |
           source helpers/artifact-helpers.sh
-          pack_packages build-output/edge/${{ matrix.arch }} packages.tar
+          pack_packages "build-output/edge/$MATRIX_ARCH" packages.tar
           tar -tvf packages.tar
-          echo "label=${{ matrix.package }}-${{ matrix.arch }}-$(git rev-parse "HEAD:pkgbuilds/${{ matrix.package }}")" >> "$GITHUB_OUTPUT"
+          echo "label=$MATRIX_PACKAGE-$MATRIX_ARCH-$(git rev-parse "HEAD:pkgbuilds/$MATRIX_PACKAGE")" >> "$GITHUB_OUTPUT"
       - name: Upload artifact
         if: steps.build.outputs.built == 'true'
         uses: actions/upload-artifact@v4
@@ -180,11 +191,11 @@ jobs:
       # Every matrix entry, as a file the shell steps can loop over:
       # package arch channels publish_arches
       - name: Plan
+        env:
+          MATRIX: ${{ needs.changes.outputs.matrix }}
         run: |
           jq -r '.include[] | "\(.package) \(.arch) \(.channels|gsub(" ";",")) \(.publish_arches|gsub(" ";","))"' \
-            <<'EOF_MATRIX' > plan.txt
-          ${{ needs.changes.outputs.matrix }}
-          EOF_MATRIX
+            <<<"$MATRIX" > plan.txt
           cat plan.txt
 
       # Fetch each package's artifact into build-output/edge/<arch>/: the PR's,
@@ -196,6 +207,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CONTAINER_ENGINE: docker
+          MATRIX: ${{ needs.changes.outputs.matrix }}
         run: |
           set -uo pipefail
           source helpers/artifact-helpers.sh
@@ -252,7 +264,7 @@ jobs:
             # Write the record now; the publish step will not run.
             jq -n --arg sha "${{ github.sha }}" --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
               --arg prefix "${OMARCHY_PUBLISH_PREFIX:-}" --arg event "${{ github.event_name }}" \
-              --slurpfile sources sources.jsonl --slurpfile plan <(jq -c '.include[]' <<<'${{ needs.changes.outputs.matrix }}' | jq -sc .) \
+              --slurpfile sources sources.jsonl --slurpfile plan <(jq -c '.include[]' <<<"$MATRIX" | jq -sc .) \
               '{time: (now|todate), commit:$sha, run:$run, event:$event, target: (if $prefix=="" then "live" else $prefix end), plan:$plan[0], sources:$sources, slots:[]}' \
               > publish-record.json
             cat publish-record.json
@@ -272,6 +284,7 @@ jobs:
           RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           OMARCHY_PUBLISH_PREFIX: ${{ vars.OMARCHY_PUBLISH_PREFIX }}
+          MATRIX: ${{ needs.changes.outputs.matrix }}
         # repo-add, gpg and bsdtar are Arch tools; run the publish inside the
         # builder image (host-native, edge) with the workspace mounted.
         run: |
@@ -280,7 +293,7 @@ jobs:
             echo "Nothing to publish: every requested package is already published at master's version."
             jq -n --arg sha "${{ github.sha }}" --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
               --arg prefix "${OMARCHY_PUBLISH_PREFIX:-}" --arg event "${{ github.event_name }}" \
-              --slurpfile sources sources.jsonl --slurpfile plan <(jq -c '.include[]' <<<'${{ needs.changes.outputs.matrix }}' | jq -sc .) \
+              --slurpfile sources sources.jsonl --slurpfile plan <(jq -c '.include[]' <<<"$MATRIX" | jq -sc .) \
               '{time: (now|todate), commit:$sha, run:$run, event:$event, target: (if $prefix=="" then "live" else $prefix end), plan:$plan[0], sources:$sources, slots:[]}' \
               > publish-record.json
             cat publish-record.json
@@ -346,7 +359,7 @@ jobs:
           if [[ -n ${unmatched:-} ]]; then
             jq -n --arg sha "${{ github.sha }}" --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
               --arg prefix "${OMARCHY_PUBLISH_PREFIX:-}" --arg event "${{ github.event_name }}" \
-              --slurpfile sources sources.jsonl --slurpfile plan <(jq -c '.include[]' <<<'${{ needs.changes.outputs.matrix }}' | jq -sc .) \
+              --slurpfile sources sources.jsonl --slurpfile plan <(jq -c '.include[]' <<<"$MATRIX" | jq -sc .) \
               '{time: (now|todate), commit:$sha, run:$run, event:$event, target: (if $prefix=="" then "live" else $prefix end), plan:$plan[0], sources:$sources, slots:[]}' \
               > publish-record.json
             exit 1
@@ -384,7 +397,7 @@ jobs:
           done
           jq -n --arg sha "${{ github.sha }}" --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --arg prefix "${OMARCHY_PUBLISH_PREFIX:-}" --arg event "${{ github.event_name }}" \
-            --slurpfile slots slots.jsonl --slurpfile sources sources.jsonl --slurpfile plan <(jq -c '.include[]' <<<'${{ needs.changes.outputs.matrix }}' | jq -sc .) \
+            --slurpfile slots slots.jsonl --slurpfile sources sources.jsonl --slurpfile plan <(jq -c '.include[]' <<<"$MATRIX" | jq -sc .) \
             '{time: (now|todate), commit:$sha, run:$run, event:$event, target: (if $prefix=="" then "live" else $prefix end), plan:$plan[0], sources:$sources, slots:$slots}' \
             > publish-record.json
           cat publish-record.json

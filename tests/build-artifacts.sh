@@ -32,10 +32,11 @@ mkdir -p "$tmp/bin" "$tmp/gh/runs" "$tmp/gh/artifacts" "$tmp/gh/named" "$tmp/gh/
 cat >"$tmp/bin/gh" <<'GH'
 #!/bin/bash
 set -euo pipefail
-path="" expr=""
+path="" expr="" paginate=0
 while (($#)); do
   case $1 in
     --jq) expr=$2; shift 2 ;;
+    --paginate) paginate=1; shift ;;
     repos/*) path=$1; shift ;;
     *) shift ;;
   esac
@@ -43,7 +44,21 @@ done
 case $path in
   */actions/runs/*/artifacts) file=$FAKE_GH/runs/$(cut -d/ -f6 <<<"$path").json ;;
   */actions/artifacts/*/zip) cat "$FAKE_GH/artifacts/$(cut -d/ -f6 <<<"$path").zip"; exit ;;
-  */actions/artifacts\?name=*) label=${path#*name=}; file=$FAKE_GH/named/${label%%&*}.json ;;
+  */actions/artifacts\?name=*)
+    # Pages the way GitHub does: per_page (default 30) at a time, every page
+    # with --paginate, else the first.
+    label=${path#*name=}; file=$FAKE_GH/named/${label%%&*}.json
+    [[ -f $file ]] || { echo "gh stub: HTTP 404" >&2; exit 1; }
+    per=30; [[ $path != *per_page=* ]] || per=${path##*per_page=}; per=${per%%&*}
+    page=0
+    while :; do
+      chunk=$(jq -c --argjson p "$page" --argjson n "$per" '{artifacts: .artifacts[$p * $n:($p + 1) * $n]}' "$file")
+      [[ $page == 0 || $(jq '.artifacts | length' <<<"$chunk") -gt 0 ]] || break
+      if [[ -n $expr ]]; then jq -r "$expr" <<<"$chunk"; else echo "$chunk"; fi
+      ((paginate)) || break
+      page=$((page + 1))
+    done
+    exit ;;
   */actions/runs/*) file=$FAKE_GH/runinfo/$(cut -d/ -f6 <<<"$path").json ;;
   */compare/*...*) file=$FAKE_GH/compare/${path##*...}.json ;;
   */contents/.github/workflows/build-pr.yml\?ref=*)
@@ -199,7 +214,7 @@ echo "{\"merge_base_commit\": {\"sha\": \"$base_sha\"}}" >"$tmp/gh/compare/$fork
 reuse() { # reuse <label> <artifact id:run id>...: the label's artifacts, newest first
   local pair list='[]' n=0
   for pair in "${@:2}"; do
-    list=$(jq -c --arg l "$1" --argjson a "${pair%%:*}" --argjson r "${pair#*:}" --arg t "2026-10-1$((8 - n))T10:00:00Z" \
+    list=$(jq -c --arg l "$1" --argjson a "${pair%%:*}" --argjson r "${pair#*:}" --arg t "$(printf '2026-10-18T10:%02d:00Z' $((59 - n)))" \
       '. + [{name: $l, id: $a, expired: false, created_at: $t, workflow_run: {id: $r}}]' <<<"$list")
     n=$((n + 1))
   done
@@ -228,6 +243,16 @@ DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q '^xpadneo-dkms
 rm "$tmp/gh/blob/$base_sha.json" "$tmp/gh/blob/$fork_sha.json"
 DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q '^xpadneo-dkms-0.9.8-1-any.pkg.tar.zst$' <(ls "$tmp/out") &&
   pass "a fork that branched before build-pr.yml existed is trusted (missing at both ends)" || fail "fork missing: $(cat "$tmp/stderr")"
+# However many untrusted artifacts come first, every page is read.
+pairs=()
+for _ in $(seq 1 25); do pairs+=("18:601"); done
+reuse "$r" "${pairs[@]}" 12:501
+echo '{"sha": "aaaa000000000000000000000000000000000001"}' >"$tmp/gh/blob/$base_sha.json"
+echo '{"sha": "bbbb000000000000000000000000000000000002"}' >"$tmp/gh/blob/$fork_sha.json"
+DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && [[ $(outfiles) == "xpadneo-dkms-0.9.8-1-any.pkg.tar.zst " ]] &&
+  pass "a trusted artifact behind a page of untrusted ones is still found" || fail "pages: $(outfiles) / $(tail -n 3 "$tmp/stderr")"
+rm "$tmp/gh/blob/$base_sha.json" "$tmp/gh/blob/$fork_sha.json"
+reuse "$r" 12:601
 touch "$tmp/gh/blob/$fork_sha.error"
 ! DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q "cannot read build-pr.yml at $fork_sha" "$tmp/stderr" &&
   pass "an error reading a fork's build-pr.yml fails, it does not read as unchanged" || fail "blob error: $(cat "$tmp/stderr")"

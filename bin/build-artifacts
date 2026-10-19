@@ -147,9 +147,12 @@ done < <(jq -r '.include[] | "\(.package)\t\(.arch)"' <<<"$matrix")
 
 while IFS= read -r label; do
   [[ -n $label ]] || continue
-  candidates=$(gh api "repos/$repo/actions/artifacts?name=$label&per_page=20" \
-    --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | reverse | .[] | "\(.id)\t\(.workflow_run.id // "")"') ||
+  # Every page, newest first across them: untrusted uploads in front must
+  # not hide a trusted one behind.
+  candidates=$(gh api --paginate "repos/$repo/actions/artifacts?name=$label&per_page=100" \
+    --jq '.artifacts[] | select(.expired | not) | "\(.created_at)\t\(.id)\t\(.workflow_run.id // "")"') ||
     die "cannot look up artifact $label"
+  candidates=$(sort -r <<<"$candidates" | cut -f2-)
   [[ -n $candidates ]] || die "the plan reused artifact $label, which no longer exists; rerun the build"
   id=""
   while IFS=$'\t' read -r artifact producer; do

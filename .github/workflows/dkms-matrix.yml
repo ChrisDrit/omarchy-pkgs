@@ -97,6 +97,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BUILD_RUN: ${{ inputs.build_run }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           TOOLING: ${{ hashFiles('bin/check-dkms', 'ci/dkms-packages') }}
         run: |
           set -euo pipefail

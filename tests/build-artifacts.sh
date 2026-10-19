@@ -24,9 +24,11 @@ git -C "$tmp/repo" -c user.name=t -c user.email=t@t commit -qm head
 head=$(git -C "$tmp/repo" rev-parse HEAD)
 tree() { git -C "$tmp/repo" rev-parse "$head:pkgbuilds/$1"; }
 
-# gh api, answered from $FAKE_GH: runs/<id>.json, artifacts/<id>.zip and
-# named/<label>.json. --jq applies the expression the way gh does.
-mkdir -p "$tmp/bin" "$tmp/gh/runs" "$tmp/gh/artifacts" "$tmp/gh/named"
+# gh api, answered from $FAKE_GH: runs/<id>.json (a run's artifacts),
+# artifacts/<id>.zip, named/<label>.json, runinfo/<id>.json (a run),
+# compare/<sha>.json and blob/<ref>.json (build-pr.yml at a commit; a 404 the
+# way gh reports one when absent). --jq applies the expression the way gh does.
+mkdir -p "$tmp/bin" "$tmp/gh/runs" "$tmp/gh/artifacts" "$tmp/gh/named" "$tmp/gh/runinfo" "$tmp/gh/compare" "$tmp/gh/blob"
 cat >"$tmp/bin/gh" <<'GH'
 #!/bin/bash
 set -euo pipefail
@@ -42,6 +44,13 @@ case $path in
   */actions/runs/*/artifacts) file=$FAKE_GH/runs/$(cut -d/ -f6 <<<"$path").json ;;
   */actions/artifacts/*/zip) cat "$FAKE_GH/artifacts/$(cut -d/ -f6 <<<"$path").zip"; exit ;;
   */actions/artifacts\?name=*) label=${path#*name=}; file=$FAKE_GH/named/${label%%&*}.json ;;
+  */actions/runs/*) file=$FAKE_GH/runinfo/$(cut -d/ -f6 <<<"$path").json ;;
+  */compare/*...*) file=$FAKE_GH/compare/${path##*...}.json ;;
+  */contents/.github/workflows/build-pr.yml\?ref=*)
+    ref=${path#*ref=}
+    [[ ! -f $FAKE_GH/blob/$ref.error ]] || { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }
+    file=$FAKE_GH/blob/$ref.json
+    [[ -f $file ]] || { echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1; } ;;
   *) echo "gh stub: unexpected $path" >&2; exit 1 ;;
 esac
 [[ -f $file ]] || { echo "gh stub: HTTP 404" >&2; exit 1; }
@@ -102,7 +111,13 @@ grep -qF "hyprland-x86_64-$(tree hyprland): nothing built (edge already holds th
   pass "a planned package with no artifact in the run built nothing" || fail "held: $(cat "$tmp/stdout")"
 
 x=xpadneo-dkms-x86_64-$(tree xpadneo-dkms)
-jq -n --arg n "$x" '{artifacts: [{name: $n, id: 99, expired: true, created_at: "2026-10-18T10:00:00Z"}, {name: $n, id: 12, expired: false, created_at: "2026-10-17T10:00:00Z"}]}' >"$tmp/gh/named/$x.json"
+# A run that may vouch for an artifact: this repository's build-pr.yml.
+runinfo() { # runinfo <id> <head repository> [path] [event] [head sha]
+  jq -n --arg r "$2" --arg p "${3:-.github/workflows/build-pr.yml}" --arg e "${4:-pull_request}" --arg s "${5:-$head}" \
+    '{path: $p, event: $e, head_repository: {full_name: $r}, head_sha: $s}' >"$tmp/gh/runinfo/$1.json"
+}
+runinfo 501 omacom/omarchy-pkgs
+jq -n --arg n "$x" '{artifacts: [{name: $n, id: 99, expired: true, created_at: "2026-10-18T10:00:00Z", workflow_run: {id: 501}}, {name: $n, id: 12, expired: false, created_at: "2026-10-17T10:00:00Z", workflow_run: {id: 501}}]}' >"$tmp/gh/named/$x.json"
 collect 1 "$(matrix linux-omarchy:x86_64)" "[\"$x\"]" || fail "a reused artifact collects: $(cat "$tmp/stderr")"
 grep -q '^xpadneo-dkms-0.9.8-1-any.pkg.tar.zst$' <(ls "$tmp/out") &&
   pass "a reused artifact from an earlier run is collected too, past an expired one, bare files included" || fail "reused: $(outfiles)"
@@ -112,7 +127,7 @@ echo '{"artifacts": []}' >"$tmp/gh/named/$gone.json"
 ! collect 1 "$(matrix)" "[\"$gone\"]" && grep -q "reused artifact $gone, which no longer exists" "$tmp/stderr" &&
   pass "a reused artifact that is gone fails, it does not pass as nothing built" || fail "gone: $(cat "$tmp/stderr")"
 
-jq -n --arg n "$gone" '{artifacts: [{name: $n, id: 15, expired: false, created_at: "2026-10-18T10:00:00Z"}]}' >"$tmp/gh/named/$gone.json"
+jq -n --arg n "$gone" '{artifacts: [{name: $n, id: 15, expired: false, created_at: "2026-10-18T10:00:00Z", workflow_run: {id: 501}}]}' >"$tmp/gh/named/$gone.json"
 collect 1 "$(matrix)" "[\"$gone\"]" && [[ -f "$tmp/out/linux-omarchy-1:7.2.8-10-aarch64.pkg.tar.zst" ]] &&
   pass "a package with an epoch comes through packages.tar under its own name" || fail "epoch: $(outfiles) $(cat "$tmp/stderr")"
 
@@ -175,3 +190,44 @@ tar -cf "$tmp/a17/zip/packages.tar" -C "$tmp/a17/files" .
 run_json 8 "$k=17"
 ! collect 8 "$(matrix linux-omarchy:x86_64)" '[]' && grep -q "holds a file whose name makepkg would not produce" "$tmp/stderr" &&
   ! grep -qF '##[' "$tmp/stderr" "$tmp/stdout" && pass "a package file name outside makepkg's rules fails, and is not repeated" || fail "file name: $(cat "$tmp/stderr")"
+
+# A reused artifact is only as good as the run that made it: anyone's run can
+# upload one under any name. Only this repository's build-pr.yml vouches, and
+# a fork's run only when its build-pr.yml is its merge base's.
+fork_sha=1111111111111111111111111111111111111111 base_sha=2222222222222222222222222222222222222222
+echo "{\"merge_base_commit\": {\"sha\": \"$base_sha\"}}" >"$tmp/gh/compare/$fork_sha.json"
+reuse() { # reuse <label> <artifact id:run id>...: the label's artifacts, newest first
+  local pair list='[]' n=0
+  for pair in "${@:2}"; do
+    list=$(jq -c --arg l "$1" --argjson a "${pair%%:*}" --argjson r "${pair#*:}" --arg t "2026-10-1$((8 - n))T10:00:00Z" \
+      '. + [{name: $l, id: $a, expired: false, created_at: $t, workflow_run: {id: $r}}]' <<<"$list")
+    n=$((n + 1))
+  done
+  jq -n --argjson a "$list" '{artifacts: $a}' >"$tmp/gh/named/$1.json"
+}
+r=xpadneo-dkms-x86_64-$(tree xpadneo-dkms)
+runinfo 601 attacker/omarchy-pkgs .github/workflows/build-pr.yml pull_request "$fork_sha"
+echo '{"sha": "aaaa000000000000000000000000000000000001"}' >"$tmp/gh/blob/$base_sha.json"
+echo '{"sha": "bbbb000000000000000000000000000000000002"}' >"$tmp/gh/blob/$fork_sha.json"
+artifact 18 bare xpadneo-dkms-6.6.6-1-any.pkg.tar.zst
+reuse "$r" 18:601 12:501
+DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && [[ $(outfiles) == "xpadneo-dkms-0.9.8-1-any.pkg.tar.zst " ]] &&
+  grep -q "run 601 cannot vouch" "$tmp/stdout" && pass "a fork's artifact whose build-pr.yml differs from its merge base is passed over for an older trusted one" ||
+  fail "fork changed: $(outfiles) / $(cat "$tmp/stdout" "$tmp/stderr")"
+reuse "$r" 12:601
+! DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q "no artifact $r comes from a build this check trusts" "$tmp/stderr" &&
+  pass "a reused artifact that only an untrusted run vouches for fails" || fail "only untrusted: $(cat "$tmp/stderr")"
+runinfo 602 omacom/omarchy-pkgs .github/workflows/evil.yml pull_request
+reuse "$r" 12:602
+! DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q "no artifact $r comes from a build this check trusts" "$tmp/stderr" &&
+  pass "an artifact from another workflow fails, whoever ran it" || fail "other workflow: $(cat "$tmp/stderr")"
+cp "$tmp/gh/blob/$base_sha.json" "$tmp/gh/blob/$fork_sha.json"
+reuse "$r" 12:601
+DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q '^xpadneo-dkms-0.9.8-1-any.pkg.tar.zst$' <(ls "$tmp/out") &&
+  pass "a fork's artifact whose build-pr.yml is its merge base's is reused" || fail "fork unchanged: $(cat "$tmp/stderr")"
+rm "$tmp/gh/blob/$base_sha.json" "$tmp/gh/blob/$fork_sha.json"
+DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q '^xpadneo-dkms-0.9.8-1-any.pkg.tar.zst$' <(ls "$tmp/out") &&
+  pass "a fork that branched before build-pr.yml existed is trusted (missing at both ends)" || fail "fork missing: $(cat "$tmp/stderr")"
+touch "$tmp/gh/blob/$fork_sha.error"
+! DEFAULT_BRANCH=master collect 1 "$(matrix)" "[\"$r\"]" && grep -q "cannot read build-pr.yml at $fork_sha" "$tmp/stderr" &&
+  pass "an error reading a fork's build-pr.yml fails, it does not read as unchanged" || fail "blob error: $(cat "$tmp/stderr")"

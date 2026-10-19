@@ -15,9 +15,18 @@
 # shape before any of it names a path or a URL. An untrusted build built
 # nothing, so it ships nothing.
 #
+# A reused artifact was made by another run, and any run can upload an
+# artifact under any name: a fork's pull request with its own workflow could
+# upload one named for another pull request's package tree. So a reused
+# artifact counts only when its run is this repository's build-pr.yml, and a
+# fork's run only when its build-pr.yml is its merge base's: the rule
+# dkms-check.yml applies to the build it checks. The newest such artifact
+# wins; none fails.
+#
 # Usage: bin/build-artifacts <dest> <run id> <head sha>
 #   Needs gh (GH_TOKEN), bsdtar and GITHUB_REPOSITORY, in a checkout that has
-#   <head sha>.
+#   <head sha>. DEFAULT_BRANCH names the branch forks are compared with (by
+#   default the repository's).
 set -euo pipefail
 
 die() { echo "build-artifacts: $*" >&2; exit 2; }
@@ -62,6 +71,43 @@ fetch() { # fetch <artifact id> <label>
   echo "$label: $n package(s)"
 }
 
+# build-pr.yml's blob at a commit, "missing" where it has none (a fork that
+# branched before it existed); any other error stops the collection.
+blob() {
+  local out
+  if out=$(gh api "repos/$repo/contents/.github/workflows/build-pr.yml?ref=$1" --jq .sha 2>&1); then
+    echo "$out"
+  elif [[ $out == *"(HTTP 404)"* ]]; then
+    echo missing
+  else
+    die "cannot read build-pr.yml at $1"
+  fi
+}
+
+# Whether a run may vouch for an artifact (see the top).
+declare -A vouches=()
+trusted_run() { # trusted_run <run id>
+  local id=$1 info head_repo head_sha base ours theirs
+  [[ $id =~ ^[0-9]+$ ]] || return 1
+  [[ -z ${vouches[$id]:-} ]] || return "${vouches[$id]}"
+  info=$(gh api "repos/$repo/actions/runs/$id") || die "cannot read run $id"
+  vouches[$id]=1
+  [[ $(jq -r .path <<<"$info") == .github/workflows/build-pr.yml ]] || return 1
+  [[ $(jq -r .event <<<"$info") =~ ^(pull_request|workflow_dispatch)$ ]] || return 1
+  head_repo=$(jq -r '.head_repository.full_name // ""' <<<"$info")
+  head_sha=$(jq -r '.head_sha // ""' <<<"$info")
+  if [[ $head_repo != "$repo" ]]; then
+    [[ $head_sha =~ ^[0-9a-f]{40}$ ]] || return 1
+    default=${DEFAULT_BRANCH:-$(gh api "repos/$repo" --jq .default_branch)} || die "cannot read the default branch"
+    base=$(gh api "repos/$repo/compare/$default...$head_sha" --jq .merge_base_commit.sha) ||
+      die "cannot find the merge base of run $id's commit"
+    ours=$(blob "$base") || exit 2
+    theirs=$(blob "$head_sha") || exit 2
+    [[ $ours =~ ^([0-9a-f]{40}|missing)$ && $theirs == "$ours" ]] || return 1
+  fi
+  vouches[$id]=0
+}
+
 # This run's artifacts, by name.
 mine=$(gh api --paginate "repos/$repo/actions/runs/$run/artifacts" --jq '.artifacts[] | select(.expired | not) | "\(.name)\t\(.id)"') ||
   die "cannot list run $run's artifacts"
@@ -101,9 +147,18 @@ done < <(jq -r '.include[] | "\(.package)\t\(.arch)"' <<<"$matrix")
 
 while IFS= read -r label; do
   [[ -n $label ]] || continue
-  id=$(gh api "repos/$repo/actions/artifacts?name=$label&per_page=20" \
-    --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .id // empty') ||
+  candidates=$(gh api "repos/$repo/actions/artifacts?name=$label&per_page=20" \
+    --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | reverse | .[] | "\(.id)\t\(.workflow_run.id // "")"') ||
     die "cannot look up artifact $label"
-  [[ -n $id ]] || die "the plan reused artifact $label, which no longer exists; rerun the build"
+  [[ -n $candidates ]] || die "the plan reused artifact $label, which no longer exists; rerun the build"
+  id=""
+  while IFS=$'\t' read -r artifact producer; do
+    if trusted_run "$producer"; then
+      id=$artifact
+      break
+    fi
+    echo "$label: artifact $artifact skipped: run $producer cannot vouch for it"
+  done <<<"$candidates"
+  [[ -n $id ]] || die "no artifact $label comes from a build this check trusts; rerun the build"
   fetch "$id" "$label"
 done < <(jq -r '.[]' <<<"$reused")

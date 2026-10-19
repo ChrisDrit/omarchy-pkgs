@@ -131,6 +131,8 @@ report() {
   jq -n --slurpfile legs "$legs_file" --slurpfile results <(cat /dev/null "${leg_results[@]}") \
     --arg plan "$plan_result" --arg url "$run_url" --arg note "$note" --arg channel "$channel" '
     def clean: tostring | gsub("[[:cntrl:]|<>`*\\[\\]\\\\]"; " ") | .[0:400];
+    # In a code span, so a name cannot mention anyone or become a link.
+    def code: clean | if . == "" then "" else "`" + . + "`" end;
     def rank: {failed: 0, error: 0, missing: 0, fixed: 1, "known-broken": 2, passed: 3, excluded: 4}[.] // 0;
     def word: {failed: "failed", error: "error", missing: "no result", fixed: "builds now",
       "known-broken": "known broken", passed: "passed", excluded: "excluded"}[.] // (. | clean);
@@ -149,17 +151,17 @@ report() {
          summary: "The plan ended as \($plan | clean), so nothing was checked. \($link)"}
       elif $m == 0 then
         {conclusion: "success", title: "Nothing to check",
-         summary: ((if $note == "" then "Nothing to build" + $where + "." else ($note | clean) end) + " " + $link)}
+         summary: ((if $note == "" then "Nothing to build" + $where else ($note | clean) end) + ". " + $link)}
       else
         ("\($n)/\($m) passed" + (if $k > 0 then ", \($k) known broken" else "" end)
           + (if $f > 0 then ", \($f) failed" else "" end)) as $title
         | {conclusion: (if $f == 0 then "success" else "failure" end), title: $title,
            summary: ([
-             "**\($title)**" + $where + (if $note == "" then "" else ": " + ($note | clean) end) + ".",
+             "**\($title)**" + $where + "." + (if $note == "" then "" else " " + ($note | clean) + "." end),
              "", $link, "",
              "| Result | Arch | Kernel | Module | Detail |", "|---|---|---|---|---|"]
              + ($rows | sort_by((.outcome | rank), .arch, .kernel, .module)
-                | map("| \(.outcome | word) | \(.arch | clean) | \(.kernel | clean) | \(.module | clean) | \(.detail | clean) |"))
+                | map("| \(.outcome | word) | \(.arch | clean) | \(.kernel | code) | \(.module | code) | \(.detail | code) |"))
              | join("\n"))}
       end'
 }
@@ -355,9 +357,15 @@ read_local() {
     parch=$(awk -F' = ' '$1 == "arch" { print $2; exit }' <<<"$info")
     base=$(awk -F' = ' '$1 == "pkgbase" { print $2; exit }' <<<"$info")
     [[ -n $name && -n $version ]] || die "$pkg has no pkgname or pkgver"
+    # A pull request built these, so their names reach logs, job outputs and
+    # the check's markdown: only what makepkg itself allows.
+    [[ $name =~ ^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*$ && ${base:-$name} =~ ^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*$ ]] ||
+      die "${pkg##*/} has a package name makepkg would not allow"
+    [[ $version =~ ^[A-Za-z0-9._+~:-]+$ ]] || die "${pkg##*/} has a version makepkg would not allow"
     [[ $parch == "$arch" || $parch == any ]] || continue
     list=$(bsdtar -tf "$pkg") || die "cannot list $pkg"
     role=$(classify <<<"$list")
+    [[ ${role#*$'\t'} =~ ^[A-Za-z0-9@._+~,-]+$ ]] || die "${pkg##*/} ships a kernel or DKMS tree with a name makepkg would not allow"
     printf '%s\t%s\t%s\t%s\t-\t%s\t%s\n' "${role%%$'\t'*}" "$name" "$version" "$pkg" "${role#*$'\t'}" "${base:-$name}"
     found=1
   done
@@ -582,10 +590,15 @@ leg_result() { # leg_result <status> <pairs.tsv>
   jq -n --arg arch "$arch" --arg kernel "$pair_kernel" --arg module "$pair_module" \
     --argjson status "$status" --rawfile pairs "$pairs" '
     def rank: {failed: 5, fixed: 4, "known-broken": 3, built: 2, excluded: 1}[.] // 0;
-    ($pairs | split("\n") | map(select(length > 0) | split("\t") | {tree: .[3], verdict: .[4], text: (.[5] // "")})) as $p
+    # The container wrote these rows: plain text only, and nothing else.
+    def plain: gsub("[^A-Za-z0-9 ._+~,;:()=/@#\u0027-]"; " ") | .[0:400];
+    ($pairs | split("\n") | map(select(length > 0) | split("\t"))) as $rows
+    | ($rows | map({tree: (.[3] // "" | plain), verdict: (.[4] // ""), text: (.[5] // "" | plain), fields: length})) as $p
     | (if ($p | length) == 0 then "" else ($p | max_by(.verdict | rank) | .verdict) end) as $worst
     | (if ($status != 0 and $status != 1) or ($p | length) == 0 then
          {outcome: "error", detail: "the check stopped before it built anything (exit status \($status))"}
+       elif any($p[]; .fields != 6 or (.verdict | rank) == 0) then
+         {outcome: "error", detail: "the verdicts are malformed"}
        elif ($status == 1) != ($worst == "failed" or $worst == "fixed") then
          {outcome: "error", detail: "exit status \($status) disagrees with the verdicts"}
        else
@@ -687,12 +700,13 @@ case $mode in
     fi
     status=0
     docker run --rm "${mounts[@]}" "$image" "${args[@]}" || status=$?
-    [[ -z $stop ]] || echo "::$stop::"
     outcome=$(leg_result "$status" "$results/pairs.tsv") || die "cannot summarise the leg"
+    # Still inside stop-commands: the detail is the container's text.
+    echo "==> $(jq -r '"\(.outcome)\(if .detail == "" then "" else ": " + .detail end)"' <<<"$outcome")"
+    [[ -z $stop ]] || echo "::$stop::"
     if [[ -n $result_file ]]; then
       printf '%s\n' "$outcome" >"$result_file" || die "cannot write $result_file"
     fi
-    echo "==> $(jq -r '"\(.outcome)\(if .detail == "" then "" else ": " + .detail end)"' <<<"$outcome")"
     case $(jq -r .outcome <<<"$outcome") in
       passed | excluded | known-broken) exit 0 ;;
       *) exit 1 ;;

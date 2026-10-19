@@ -107,6 +107,17 @@ if check --local "$tmp/empty" >/dev/null; then fail "an empty --local must fail"
 grep -q 'holds no package for x86_64' "$tmp/stderr" && pass "an empty --local is an error" || fail "empty: $(cat "$tmp/stderr")"
 if check --local "$tmp/missing" >/dev/null; then fail "a missing --local must fail"; fi
 grep -q 'is not a directory' "$tmp/stderr" && pass "a missing --local is an error" || fail "missing: $(cat "$tmp/stderr")"
+# A pull request's package names reach logs and markdown: makepkg's rules only.
+package "$tmp/local-evil" 'xpadneo##[add-mask]x' 1-1 x86_64 usr/src/hid-xpadneo-1/dkms.conf
+if check --local "$tmp/local-evil" >/dev/null; then fail "a package name makepkg would not allow must fail"; fi
+grep -q 'has a package name makepkg would not allow' "$tmp/stderr" || fail "evil name: $(cat "$tmp/stderr")"
+package "$tmp/local-evil2" xpadneo-dkms '1-1 ##[x]' x86_64 usr/src/hid-xpadneo-1/dkms.conf
+if check --local "$tmp/local-evil2" >/dev/null; then fail "a version makepkg would not allow must fail"; fi
+grep -q 'has a version makepkg would not allow' "$tmp/stderr" || fail "evil version: $(cat "$tmp/stderr")"
+package "$tmp/local-evil3" xpadneo-dkms 1-1 x86_64 'usr/src/hid xpadneo [x]/dkms.conf'
+if check --local "$tmp/local-evil3" >/dev/null; then fail "a DKMS tree name makepkg would not allow must fail"; fi
+grep -q 'ships a kernel or DKMS tree with a name makepkg would not allow' "$tmp/stderr" &&
+  pass "a pull request's package name, version or tree outside makepkg's rules is an error" || fail "evil tree: $(cat "$tmp/stderr")"
 
 # kernels= limits a module to the kernels it is installed with.
 entry scoped linux-aurora-headers 7.1.12-2 usr/lib/modules/7.1.12-2-ARCH/build/Makefile
@@ -361,7 +372,20 @@ leg 0 ipu7:failed
   pass "an exit status that disagrees with the verdicts is an error" || fail "disagree: $(cat "$tmp/result.json")"
 token=$(sed -n 's/^::stop-commands::\([0-9a-f]\{32\}\)$/\1/p' <<<"$out")
 [[ -n $token ]] && sed -n "/^::stop-commands::$token$/,/^::$token::$/p" <<<"$out" | grep -q '^::error::printed by' &&
-  pass "nothing the container prints acts as a workflow command" || fail "stop-commands: $out"
+  sed -n "/^::stop-commands::$token$/,/^::$token::$/p" <<<"$out" | grep -q '^==> ' &&
+  pass "nothing the container prints, nor the outcome made from it, acts as a workflow command" || fail "stop-commands: $out"
+printf 'linux-omarchy-headers\t7.2.8-9-omarchy\tintel-ipu7-camera\tipu7-1.0.6\tbuilt\tbuilt\n' >"$tmp/pairs.tsv"
+printf 'linux-omarchy-headers\t7.2.8-9-omarchy\tintel-ipu7-camera\tvision-1.0.6\tgarbage\tbuilt\n' >>"$tmp/pairs.tsv"
+leg_status=0
+PATH="$tmp/dockerbin:$PATH" FAKE_STATUS=0 FAKE_PAIRS="$tmp/pairs.tsv" "$ROOT/bin/check-dkms" container --arch x86_64 --channel edge \
+  --kernel "linux-omarchy 7.2.8-9" --module "intel-ipu7-camera 1.0.6-3" --result "$tmp/result.json" >/dev/null 2>&1 || leg_status=$?
+((leg_status == 1)) && [[ $(outcome) == error ]] && grep -q 'malformed' "$tmp/result.json" &&
+  pass "a verdict row the check does not know is an error, never a pass" || fail "malformed: $(cat "$tmp/result.json")"
+printf 'linux-omarchy-headers\t7.2.8-9-omarchy\tintel-ipu7-camera\tipu7-1.0.6\tbuilt\tbuilt ##[add-mask]x <b>\n' >"$tmp/pairs.tsv"
+PATH="$tmp/dockerbin:$PATH" FAKE_STATUS=0 FAKE_PAIRS="$tmp/pairs.tsv" "$ROOT/bin/check-dkms" container --arch x86_64 --channel edge \
+  --kernel "linux-omarchy 7.2.8-9" --module "intel-ipu7-camera 1.0.6-3" --result "$tmp/result.json" >/dev/null 2>&1 || true
+jq -e '.detail | test("[\\[<>]") | not' "$tmp/result.json" >/dev/null &&
+  pass "the container's text reaches the result as plain text" || fail "plain: $(cat "$tmp/result.json")"
 
 # report: one verdict for a run, from its legs and their results.
 mkdir -p "$tmp/report"
@@ -373,7 +397,7 @@ jq -n '{arch:"x86_64",kernel:"linux-omarchy 7.2.8-9",module:"macbook12-spi-drive
 report() { "$ROOT/bin/check-dkms" report --legs "$tmp/legs.json" --results "$tmp/report" --url https://example.invalid/run --channel edge "$@" 2>"$tmp/stderr"; }
 out=$(report --plan success) || fail "report: $(cat "$tmp/stderr")"
 jq -e '.conclusion == "failure" and .title == "1/3 passed, 1 known broken, 1 failed"' <<<"$out" >/dev/null &&
-  jq -r .summary <<<"$out" | grep -qF '| no result | aarch64 | linux-aurora 7.1.12.aurora7-2 | xpadneo-dkms 0.10.4-1.1 | the leg left no result |' &&
+  jq -r .summary <<<"$out" | grep -qF '| no result | aarch64 | `linux-aurora 7.1.12.aurora7-2` | `xpadneo-dkms 0.10.4-1.1` | `the leg left no result` |' &&
   pass "a leg without a result fails the run, and the title counts passed, known broken and failed" || fail "report: $out"
 jq -n '{arch:"aarch64",kernel:"linux-aurora 7.1.12.aurora7-2",module:"xpadneo-dkms 0.10.4-1.1",outcome:"passed",detail:""}' >"$tmp/report/3.json"
 out=$(report --plan success)
@@ -384,14 +408,15 @@ out=$(report --plan failure)
 jq -e '.conclusion == "failure" and .title == "The DKMS plan did not finish"' <<<"$out" >/dev/null &&
   pass "a plan that failed fails the run" || fail "plan failed: $out"
 echo '[]' >"$tmp/no-legs.json"
-out=$("$ROOT/bin/check-dkms" report --legs "$tmp/no-legs.json" --results "$tmp/report" --plan success --note "This build ships no kernel or DKMS package.")
+out=$("$ROOT/bin/check-dkms" report --legs "$tmp/no-legs.json" --results "$tmp/report" --plan success --note "This build ships no kernel or DKMS package")
 jq -e '.conclusion == "success" and .title == "Nothing to check" and (.summary | startswith("This build ships no kernel or DKMS package."))' <<<"$out" >/dev/null &&
   pass "a run without legs has nothing to check, and says why" || fail "no legs: $out"
-printf '%s\n' '[{"arch":"x86_64","kernel":"linux-omarchy 7.2.8-9","module":"evil|<img src=x>[a](https://x)`b`"}]' >"$tmp/evil.json"
+printf '%s\n' '[{"arch":"x86_64","kernel":"@omacom/core https://attacker.invalid","module":"evil|<img src=x>[a](https://x)`b`"}]' >"$tmp/evil.json"
 out=$("$ROOT/bin/check-dkms" report --legs "$tmp/evil.json" --results "$tmp/report" --plan success)
 row=$(jq -r .summary <<<"$out" | tail -n 1)
-[[ $(tr -cd '|' <<<"$row" | wc -c) == 6 && $row != *'<'* && $row != *'['* && $row != *'`'* ]] &&
-  pass "names from package metadata cannot add cells, HTML or links to the summary" || fail "escape: $row"
+[[ $(tr -cd '|' <<<"$row" | wc -c) == 6 && $row != *'<'* && $row != *'['* ]] &&
+  [[ $row == '| no result | x86_64 | `@omacom/core https://attacker.invalid` | `evil  img src=x  a (https://x) b ` | `the leg left no result` |' ]] &&
+  pass "names from package metadata cannot add cells, HTML, links or mentions to the summary" || fail "escape: $row"
 
 # A kernel built with clang (linux-aurora) needs clang, llvm and lld: DKMS
 # builds its modules with LLVM=1. Read from the installed build tree.

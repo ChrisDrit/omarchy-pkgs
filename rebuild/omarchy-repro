@@ -1,0 +1,495 @@
+#!/bin/bash
+#
+# omarchy-repro - rebuild a published Omarchy package and check it matches
+#
+# The verification Arch's rebuilderd does with archlinux-repro, for packages
+# built the way this repository builds them (build/Dockerfile,
+# build/build.sh): read the package's .BUILDINFO, find the PKGBUILD whose
+# sha256 it records, recreate the build root from exactly the package
+# versions it lists, and rebuild at its builddate in an unprivileged Docker
+# container. Package scriptlets run in that container, never on the host.
+#
+# usage: omarchy-repro [--outdir DIR] [--nocheck] [--] <package>...
+#
+#   Without --outdir, the packages given are the published files of one
+#   build, and each is compared byte for byte with its rebuild. With
+#   --outdir, the first package only identifies the build, and every
+#   package the rebuild produced is copied to DIR for the caller to compare
+#   (rebuilderd's worker does this). Nothing is copied when the build fails.
+#
+#   --nocheck skips check(), as Arch's rebuilder does.
+#
+# The last line printed is always (exit 0, or with --outdir 1 unless BUILT):
+#   omarchy-repro: <pkgbase> <version> <status> <seconds> <detail>
+# status: GOOD     every package given rebuilt bit for bit (without --outdir)
+#         BAD      rebuilt, and at least one package differs (without --outdir)
+#         BUILT    rebuilt, packages are in DIR (with --outdir)
+#         FTBFS    makepkg failed (sources gone, a test failed, the build broke)
+#         NOINPUT  a package .BUILDINFO lists can't be fetched
+#         NORECIPE no commit of this repository has the recorded PKGBUILD
+#         INVALID  the .BUILDINFO is missing or has a field we won't use
+#         VERIFIER the verifier failed; says nothing about the package
+#
+# Environment:
+#   REPRO_STATE  state directory: jobs, inputs cache, results (default
+#                /var/lib/omarchy-repro, or $XDG_STATE_HOME/omarchy-repro)
+#   REPRO_PKGS   omarchy-pkgs clone or mirror to take recipes from (default:
+#                this checkout); fetched before each job when it has a remote
+#   REPRO_REV    revision whose history holds the recipes (default
+#                refs/remotes/origin/master, else HEAD)
+#   REPRO_DOCKER the docker command (default docker; "sudo -n docker" works)
+#   REPRO_IMAGE  the container image (default docker.io/library/archlinux:base)
+#   REPRO_LIMITS docker resource flags (default "--memory 24g --memory-swap 24g")
+#   REPRO_CACHE_GB inputs cache size before pruning (default 50)
+#   REPRO_CHANNEL_BASE, REPRO_ARCHIVE  where our channels and the Arch archive
+#                are (defaults https://pkgs.omarchy.org and
+#                https://archive.archlinux.org/packages; file:// for tests)
+
+set -uo pipefail
+
+self=$(realpath "${BASH_SOURCE[0]}")
+here=${self%/*}
+root=${here%/*}
+
+if [[ -n ${XDG_STATE_HOME:-} ]] || (( EUID != 0 )); then
+  default_state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-repro
+else
+  default_state=/var/lib/omarchy-repro
+fi
+STATE=${REPRO_STATE:-$default_state}
+PKGS=${REPRO_PKGS:-$root}
+DOCKER=${REPRO_DOCKER:-docker}
+IMAGE=${REPRO_IMAGE:-docker.io/library/archlinux:base}
+LIMITS=${REPRO_LIMITS:-"--memory 24g --memory-swap 24g"}
+CACHE_GB=${REPRO_CACHE_GB:-50}
+CHANNELS="edge rc stable"
+CHANNEL_BASE=${REPRO_CHANNEL_BASE:-https://pkgs.omarchy.org}
+ARCHIVE=${REPRO_ARCHIVE:-https://archive.archlinux.org/packages}
+
+outdir=""
+nocheck=0
+while (( $# )); do
+  case $1 in
+  --outdir)
+    outdir=${2:?--outdir needs a directory}
+    shift 2
+    ;;
+  --nocheck)
+    nocheck=1
+    shift
+    ;;
+  --)
+    shift
+    break
+    ;;
+  -*)
+    echo "unknown option: $1" >&2
+    exit 2
+    ;;
+  *)
+    break
+    ;;
+  esac
+done
+if (( $# == 0 )); then
+  echo "usage: omarchy-repro [--outdir DIR] [--nocheck] [--] <package>..." >&2
+  exit 2
+fi
+published=("$@")
+
+declare -A bi=()
+buildenv=()
+buildopts=()
+installed=()
+start=$SECONDS
+validated=0
+job=""
+container=""
+
+# Shapes makepkg itself allows (makepkg's lint_pkgname, lint_pkgver,
+# lint_pkgrel, lint_epoch), so nothing taken from a published file can
+# escape a path, a URL or a shell word.
+re_name='^[a-z0-9@_+][a-z0-9@._+-]*$'
+re_version='^([0-9]+:)?[A-Za-z0-9._+]+-[0-9]+(\.[0-9]+)?$'
+re_entry='^[a-z0-9@_+][a-z0-9@._+-]*-([0-9]+:)?[A-Za-z0-9._+]+-[0-9]+(\.[0-9]+)?-(x86_64|aarch64|any)$'
+re_dir='^/(src|home)(/[A-Za-z0-9@_+][A-Za-z0-9@._+-]*)+$'
+re_flag='^!?[a-z][a-z_]*$'
+
+log() {
+  echo "$*"
+}
+
+# The recipe repository may belong to another user than the worker (a
+# mirror shared with a container running as root); trust exactly it.
+pkgs_git() {
+  git -c safe.directory="$PKGS" -C "$PKGS" "$@"
+}
+
+# The verdict goes to the log and, when the log is a file, to the caller too.
+# Every job's log is kept under results/, named after the build once its
+# .BUILDINFO has passed validation.
+result() {
+  local status=$1 detail=${2:-} line keep
+  line="omarchy-repro: ${bi[pkgbase]:-?} ${bi[pkgver]:-?} $status $((SECONDS - start)) $detail"
+  echo "$line"
+  if [[ -n $job && -f $job/log ]]; then
+    keep=$(keep_dir)
+    cp "$job/log" "$keep/log"
+  fi
+  if [[ -z $outdir ]]; then
+    echo "$line" >&3
+    exit 0
+  elif [[ $status == "BUILT" ]]; then
+    exit 0
+  else
+    exit 1
+  fi
+}
+
+cleanup() {
+  if [[ -n $container ]]; then
+    $DOCKER rm -f "$container" >/dev/null 2>&1
+  fi
+  if [[ -n $job && -d $job ]]; then
+    if [[ -d $job/root ]]; then
+      # The root belongs to root inside the container; remove it there.
+      $DOCKER run --rm -v "$job:/job" "$IMAGE" rm -rf --one-file-system /job/root >/dev/null 2>&1
+    fi
+    rm -rf --one-file-system "$job"
+  fi
+}
+trap cleanup EXIT
+
+# Results of this job: results/<pkgbase>-<version>/<job>/, and "latest"
+# pointing at the newest, so two jobs of one build don't overwrite each other.
+keep_dir() {
+  local build dir
+  if (( validated )); then
+    build=$STATE/results/${bi[pkgbase]}-${bi[pkgver]/:/_}
+  else
+    build=$STATE/results/invalid
+  fi
+  dir=$build/${job##*.}
+  mkdir -p "$dir"
+  ln -sfn "${job##*.}" "$build/latest.$$" && mv -T "$build/latest.$$" "$build/latest"
+  echo "$dir"
+}
+
+parse_buildinfo() {
+  local line key val
+  while IFS= read -r line; do
+    key=${line%% = *}
+    val=${line#* = }
+    case $key in
+    buildenv) buildenv+=("$val") ;;
+    options) buildopts+=("$val") ;;
+    installed) installed+=("$val") ;;
+    *) bi[$key]=$val ;;
+    esac
+  done
+}
+
+# Every field used later, checked before anything uses it.
+validate_buildinfo() {
+  local v
+  [[ ${bi[pkgbase]:-} =~ $re_name ]] || return 1
+  [[ ${bi[pkgver]:-} =~ $re_version ]] || return 1
+  [[ ${bi[builddate]:-} =~ ^[0-9]+$ ]] || return 1
+  [[ ${bi[pkgbuild_sha256sum]:-} =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ ${bi[startdir]:-} =~ $re_dir && ${bi[startdir]} != *"/.."* ]] || return 1
+  [[ ${bi[builddir]:-${bi[startdir]}} =~ $re_dir && ${bi[builddir]:-} != *"/.."* ]] || return 1
+  [[ ${bi[packager]:-} != *$'\n'* ]] || return 1
+  for v in "${buildenv[@]}" "${buildopts[@]}"; do
+    [[ $v =~ $re_flag ]] || return 1
+  done
+  (( ${#installed[@]} > 0 )) || return 1
+  for v in "${installed[@]}"; do
+    [[ $v =~ $re_entry ]] || return 1
+  done
+}
+
+# The PKGBUILD makepkg hashes is the one on disk when it packages, which for
+# a VCS package is after pkgver() wrote the refreshed version back. So a
+# commit matches with its PKGBUILD as committed, or with the recorded pkgver
+# and pkgrel written in. The newest matching commit from before the build
+# wins; a build that ran before its commit landed (a PR build, published at
+# merge) gets the earliest matching commit after it. Prints "<commit> raw|ver".
+find_recipe() {
+  local dir=$1 want=${bi[pkgbuild_sha256sum]} date=${bi[builddate]}
+  local ver rel commit ct how later=""
+  ver=${bi[pkgver]%-*}
+  ver=${ver#*:}
+  rel=${bi[pkgver]##*-}
+  while read -r commit ct; do
+    how=""
+    if [[ $(pkgs_git show "$commit:$dir/PKGBUILD" 2>/dev/null | sha256sum) == "$want "* ]]; then
+      how=raw
+    elif [[ $(pkgs_git show "$commit:$dir/PKGBUILD" 2>/dev/null |
+      sed -e "s/^pkgver=.*/pkgver=$ver/" -e "s/^pkgrel=.*/pkgrel=$rel/" | sha256sum) == "$want "* ]]; then
+      how=ver
+    fi
+    if [[ -z $how ]]; then
+      continue
+    fi
+    if (( ct <= date )); then
+      echo "$commit $how"
+      return 0
+    fi
+    later="$commit $how"
+  done < <(pkgs_git log --format='%H %ct' "$REV" -- "$dir")
+  if [[ -n $later ]]; then
+    echo "$later"
+  fi
+}
+
+# Exact input packages: names we publish from our channels first (a file can
+# outlive its database entry), everything else and any miss from the Arch
+# archive. Each lands in the shared cache and is copied into the job (a
+# reflink where the filesystem has them), so nothing in a job can change a
+# file another job uses. Fetching and copying hold the cache lock shared,
+# pruning holds it exclusively.
+fetch_input() {
+  local entry=$1 cache=$2 names=$3 name ext ch tmp
+  name=${entry%-*}
+  name=${name%-*}
+  name=${name%-*}
+  for ext in zst xz; do
+    if [[ -s $cache/$entry.pkg.tar.$ext ]]; then
+      echo "$cache/$entry.pkg.tar.$ext"
+      return 0
+    fi
+  done
+  tmp=$(mktemp "$cache/.part.XXXXXX") || return 1
+  if grep -qxF "$name" "$names"; then
+    for ch in $CHANNELS; do
+      if curl -sfL --retry 3 -o "$tmp" "$CHANNEL_BASE/$ch/x86_64/$entry.pkg.tar.zst"; then
+        mv "$tmp" "$cache/$entry.pkg.tar.zst"
+        echo "$cache/$entry.pkg.tar.zst"
+        return 0
+      fi
+    done
+  fi
+  for ext in zst xz; do
+    if curl -sfL --retry 3 -o "$tmp" "$ARCHIVE/${name:0:1}/$name/$entry.pkg.tar.$ext"; then
+      mv "$tmp" "$cache/$entry.pkg.tar.$ext"
+      echo "$cache/$entry.pkg.tar.$ext"
+      return 0
+    fi
+  done
+  rm -f "$tmp"
+  return 1
+}
+
+fetch_inputs() {
+  local cache=$STATE/cache names=$STATE/cache/omarchy.names entry ch
+  mkdir -p "$cache" "$job/inputs"
+  if [[ ! -s $names ]] || [[ -n $(find "$names" -mmin +60 2>/dev/null) ]]; then
+    for ch in $CHANNELS; do
+      curl -sfL "$CHANNEL_BASE/$ch/x86_64/omarchy.db" |
+        bsdtar -xOf - --include='*/desc' | awk '/^%NAME%$/{getline; print}'
+    done | sort -u >"$names.$$"
+    if [[ -s $names.$$ ]]; then
+      mv "$names.$$" "$names"
+    else
+      rm -f "$names.$$"
+      [[ -s $names ]] || return 1
+    fi
+  fi
+  export CHANNELS CHANNEL_BASE ARCHIVE
+  export -f fetch_input
+  printf '%s\n' "${installed[@]}" |
+    xargs -P 8 -I{} bash -c 'fetch_input "$1" "$2" "$3" >/dev/null || echo "$1" >>"$4"' _ {} "$cache" "$names" "$job/missing"
+  : >"$job/files"
+  local file
+  for entry in "${installed[@]}"; do
+    if file=$(fetch_input "$entry" "$cache" "$names") && cp --reflink=auto "$file" "$job/inputs/${file##*/}"; then
+      echo "/job/inputs/${file##*/}" >>"$job/files"
+    else
+      grep -qxF "$entry" "$job/missing" 2>/dev/null || echo "$entry" >>"$job/missing"
+    fi
+  done
+}
+
+# Drop the oldest cache files until under the cap, while no job is fetching.
+prune_cache() {
+  local cache=$STATE/cache used
+  used=$(du -s --block-size=1G "$cache" 2>/dev/null | cut -f1)
+  if (( used <= CACHE_GB )); then
+    return 0
+  fi
+  (
+    flock 8
+    find "$cache" -maxdepth 1 -name '*.pkg.tar.*' -printf '%T@ %p\n' | sort -n |
+      while read -r _ file; do
+        rm -f "$file"
+        used=$(du -s --block-size=1G "$cache" | cut -f1)
+        (( used <= CACHE_GB )) && break
+      done
+  ) 8>"$STATE/cache.lock"
+}
+
+# --- the job ---
+
+mkdir -p "$STATE/jobs" || { echo "omarchy-repro: ? ? VERIFIER 0 cannot create $STATE/jobs"; exit 0; }
+job=$(mktemp -d "$STATE/jobs/job.XXXXXXXX") || { echo "omarchy-repro: ? ? VERIFIER 0 cannot create a job directory"; exit 0; }
+container=repro-${job##*.}
+
+exec 3>&1
+if [[ -n $outdir ]]; then
+  # rebuilderd keeps the backend's output as the build log.
+  exec > >(tee "$job/log") 2>&1
+else
+  exec >"$job/log" 2>&1
+fi
+
+if ! buildinfo=$(bsdtar -xOqf "${published[0]}" .BUILDINFO 2>/dev/null); then
+  result INVALID "no .BUILDINFO in ${published[0]##*/}"
+fi
+parse_buildinfo <<<"$buildinfo"
+if ! validate_buildinfo; then
+  result INVALID ".BUILDINFO has a field outside makepkg's rules"
+fi
+validated=1
+startdir=${bi[startdir]}
+builddir=${bi[builddir]:-$startdir}
+# Only validated fields reach the log: the log is not a place for text from
+# the published file.
+log "== build ${bi[pkgbase]} ${bi[pkgver]} builddate ${bi[builddate]} startdir $startdir builddir $builddir"
+log "== options ${buildopts[*]} buildenv ${buildenv[*]} inputs ${#installed[@]}"
+
+# Recipes: refresh the mirror if it has a remote, under a lock so parallel
+# jobs don't fetch at once. A failed fetch is not fatal: the recipe may
+# already be there.
+if pkgs_git remote get-url origin >/dev/null 2>&1; then
+  (
+    flock 9
+    timeout 120 git -c safe.directory="$PKGS" -C "$PKGS" fetch -q origin '+refs/heads/master:refs/remotes/origin/master' ||
+      log "warning: could not fetch $PKGS"
+  ) 9>"$STATE/recipes.lock"
+fi
+if ! pkgs_git rev-parse --git-dir >/dev/null 2>&1; then
+  result VERIFIER "cannot read the recipe repository $PKGS"
+fi
+REV=${REPRO_REV:-refs/remotes/origin/master}
+if ! pkgs_git rev-parse -q --verify "$REV^{commit}" >/dev/null; then
+  REV=HEAD
+fi
+
+recipe=""
+for dir in "pkgbuilds/${startdir##*/}" "pkgbuilds/${bi[pkgbase]}"; do
+  recipe=$(find_recipe "$dir")
+  [[ -n $recipe ]] && break
+done
+if [[ -z $recipe ]]; then
+  result NORECIPE "no commit has PKGBUILD sha256 ${bi[pkgbuild_sha256sum]:0:12}"
+fi
+read -r commit how <<<"$recipe"
+log "== recipe $dir at $commit ($how)"
+
+mkdir -p "$job/recipe" "$job/build" "$job/outputs"
+if ! pkgs_git archive "$commit" "$dir" | tar -x -C "$job/recipe" --strip-components=2; then
+  result VERIFIER "cannot extract the recipe"
+fi
+if [[ $how == "ver" ]]; then
+  ver=${bi[pkgver]%-*}
+  sed -i -e "s/^pkgver=.*/pkgver=${ver#*:}/" -e "s/^pkgrel=.*/pkgrel=${bi[pkgver]##*-}/" "$job/recipe/PKGBUILD"
+fi
+if [[ $(sha256sum <"$job/recipe/PKGBUILD") != "${bi[pkgbuild_sha256sum]} "* ]]; then
+  result NORECIPE "the PKGBUILD from $commit does not hash to the recorded sha256"
+fi
+if ! pkgs_git show "$commit:build/gpg-keys.txt" >"$job/build/gpg-keys.txt" 2>/dev/null; then
+  rm -f "$job/build/gpg-keys.txt"
+fi
+if ! pkgs_git show "$commit:build/import-gpg-keys.sh" >"$job/build/import-gpg-keys.sh" 2>/dev/null; then
+  echo 'true' >"$job/build/import-gpg-keys.sh"
+fi
+chmod +x "$job/build/import-gpg-keys.sh"
+
+log "== fetching ${#installed[@]} inputs"
+exec 8>"$STATE/cache.lock"
+flock -s 8
+if ! fetch_inputs; then
+  result VERIFIER "cannot read the channel databases"
+fi
+flock -u 8
+if [[ -s $job/missing ]]; then
+  mapfile -t missing <"$job/missing"
+  printf 'missing input: %s\n' "${missing[@]}"
+  result NOINPUT "${#missing[@]} missing: ${missing[*]:0:3}"
+fi
+prune_cache
+
+# CAP_SYS_ADMIN only to mount the container's own proc, sys and dev into the
+# root; no --privileged and no host devices.
+# shellcheck disable=SC2086
+$DOCKER run --rm --name "$container" $LIMITS --cap-add SYS_ADMIN \
+  -v "$job:/job" -v "$here/inner.sh:/inner.sh:ro" \
+  -e STARTDIR="$startdir" -e BUILDDIR="$builddir" -e BUILDDATE="${bi[builddate]}" \
+  -e PACKAGER="${bi[packager]:-Unknown Packager}" \
+  -e OPTIONS="${buildopts[*]}" -e BUILDENV="${buildenv[*]}" \
+  -e NOCHECK="$nocheck" -e OWNER="$(id -u):$(id -g)" \
+  "$IMAGE" /bin/bash /inner.sh
+rc=$?
+container=""
+state=$(cat "$job/state" 2>/dev/null)
+
+if (( rc != 0 )) || [[ $state != "built" ]]; then
+  why=${state#failed }
+  if (( rc == 125 || rc == 126 || rc == 127 )); then
+    result VERIFIER "docker could not run the container (exit $rc)"
+  elif [[ -z $state ]]; then
+    result VERIFIER "the container exited $rc before it started"
+  elif [[ $state != failed* ]]; then
+    result VERIFIER "the container exited $rc during: $state"
+  elif [[ $why == verifier:* ]]; then
+    result VERIFIER "$why"
+  elif (( rc == 137 )); then
+    result VERIFIER "container killed (memory cap, timeout or watchdog)"
+  elif grep -aqE "No space left on device|Cannot allocate memory" "$job/log"; then
+    result VERIFIER "$why (resources)"
+  elif grep -aqE "Failure while downloading|Failed to download|could not be downloaded|unable to access" "$job/log"; then
+    result FTBFS "$why (sources)"
+  elif grep -aq "A failure occurred in check()" "$job/log"; then
+    result FTBFS "$why (check)"
+  else
+    result FTBFS "$why"
+  fi
+fi
+
+built=("$job/outputs"/*.pkg.tar.zst)
+if [[ ! -f ${built[0]} ]]; then
+  result VERIFIER "the container reported a build but left no package"
+fi
+
+if [[ -n $outdir ]]; then
+  # All or nothing: the worker compares whatever is in the directory, even
+  # after a failure, so the packages appear there in one rename.
+  mkdir -p "$(dirname "$outdir")"
+  staging=$(mktemp -d "${outdir%/}.staging.XXXXXX") || result VERIFIER "cannot stage the packages"
+  if ! cp "${built[@]}" "$staging/" || { [[ -d $outdir ]] && ! rmdir "$outdir"; } || ! mv -T "$staging" "$outdir"; then
+    rm -rf "$staging"
+    result VERIFIER "cannot hand the packages to $outdir"
+  fi
+  result BUILT "${#built[@]} packages in $outdir"
+fi
+
+log "== comparing"
+status=GOOD
+detail=""
+# Mismatching rebuilds are kept next to the log for diffoscope.
+keep=$(keep_dir)
+for pub in "${published[@]}"; do
+  name=${pub##*/}
+  if [[ ! -f $job/outputs/$name ]]; then
+    status=BAD
+    detail+="$name:not-produced "
+  elif cmp -s "$pub" "$job/outputs/$name"; then
+    log "identical: $name"
+  else
+    status=BAD
+    detail+="$name "
+    sha256sum "$pub" "$job/outputs/$name"
+    cp "$job/outputs/$name" "$keep/"
+  fi
+done
+result "$status" "$detail"

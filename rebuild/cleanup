@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# Remove what killed jobs left behind: their containers and job directories.
+#
+# usage: cleanup [--all | --older-than MINUTES]
+#
+#   --all            everything; only while no job can be running (the
+#                    worker's ExecStartPre)
+#   --older-than M   only jobs older than M minutes (a timer, with M above
+#                    the worker's build timeout)
+#
+# A trap in omarchy-repro cleans up after every job that exits; this is for
+# the ones that can't, killed by SIGKILL after the worker's timeout.
+
+set -uo pipefail
+
+if [[ -n ${XDG_STATE_HOME:-} ]] || (( EUID != 0 )); then
+  default_state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-repro
+else
+  default_state=/var/lib/omarchy-repro
+fi
+STATE=${REPRO_STATE:-$default_state}
+DOCKER=${REPRO_DOCKER:-docker}
+IMAGE=${REPRO_IMAGE:-docker.io/library/archlinux:base}
+
+case ${1:-} in
+--all)
+  minutes=0
+  ;;
+--older-than)
+  minutes=${2:?--older-than needs minutes}
+  ;;
+*)
+  echo "usage: cleanup [--all | --older-than MINUTES]" >&2
+  exit 2
+  ;;
+esac
+
+now=$(date +%s)
+jobs=$(realpath -e "$STATE/jobs" 2>/dev/null) || exit 0
+for job in "$jobs"/job.*; do
+  # Only real directories directly under jobs/: a symlink there would point
+  # the removal (and Docker's bind mount) somewhere else.
+  if [[ -L $job || ! -d $job || $(realpath -e "$job") != "$jobs/${job##*/}" ]]; then
+    continue
+  fi
+  age=$(( (now - $(stat -c %Y "$job")) / 60 ))
+  if (( age < minutes )); then
+    continue
+  fi
+  container=repro-${job##*.}
+  $DOCKER rm -f "$container" >/dev/null 2>&1
+  if [[ -d $job/root ]]; then
+    $DOCKER run --rm -v "$job:/job" "$IMAGE" rm -rf --one-file-system /job/root >/dev/null 2>&1
+  fi
+  rm -rf --one-file-system "$job"
+  echo "removed $job (${age} min old)"
+done

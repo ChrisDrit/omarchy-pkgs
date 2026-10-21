@@ -18,7 +18,6 @@ makedepends=(
   binutils
   cpio
   gettext
-  git
   glibc
   libelf
   libgcc
@@ -42,13 +41,46 @@ options=(
 )
 _srcname=linux-${pkgver%.*}
 _srctag=v${pkgver%.*}-${pkgver##*.}
-T2_PATCH_HASH=e16720782ee30fac38486b6c58d32443899c136a
+# t2linux/linux-t2-patches at e16720782ee30fac38486b6c58d32443899c136a, whose
+# version file reads KVER=7.2.10: the set made for this kernel series. The
+# files live beside this PKGBUILD, each with its checksum, so a kernel bump
+# shows the T2 drivers' diff in review and the build fetches nothing from that
+# repository. extra_config is the same commit's config fragment.
+_t2linux_patches=(
+  1001-Add-t2bce-driver-stack.patch
+  1002-Integrate-t2bce-driver-stack.patch
+  2008-i915-4-lane-quirk-for-mbp15-1.patch
+  2009-apple-gmux-allow-switching-to-igpu-at-probe.patch
+  3001-applesmc-convert-static-structures-to-drvdata.patch
+  3002-applesmc-make-io-port-base-addr-dynamic.patch
+  3003-applesmc-switch-to-acpi_device-from-platform.patch
+  3004-applesmc-key-interface-wrappers.patch
+  3005-applesmc-basic-mmio-interface-implementation.patch
+  3006-applesmc-fan-support-on-T2-Macs.patch
+  3007-applesmc-Add-iMacPro-to-applesmc_whitelist.patch
+  3008-applesmc-make-applesmc_remove-void.patch
+  3009-applesmc-battery-charge-limiter.patch
+  4001-asahi-trackpad.patch
+  4003-HID-apple-ignore-the-trackpad-on-T2-Macs.patch
+  4004-HID-magicmouse-Add-support-for-trackpads-found-on-T2.patch
+  5001-HID-appletb-kbd-add-option-to-switch-default-layer-o.patch
+  5002-drm-appletbdrm-Add-suspend-and-resume-support.patch
+  6001-drm-amd-pm-Fix-boot-problems-in-5300.patch
+  7001-drm-i915-fbdev-Discard-BIOS-framebuffers-exceeding-h.patch
+  7003-amdgpu-add-support-for-5K.patch
+  8001-Add-APFS-driver.patch
+  8002-Necessary-modifications-to-build-APFS-with-the-kerne.patch
+  9001-ACPI-x86-Apple-T2-systems-need-early-CPU-offlining.patch
+  9002-Bluetooth-hci_event-strip-Broadcom-vendor-bits-from-adv-type.patch
+  9003-PATCH-wireless-next-v2-wifi-brcmfmac-Improve-D3-substate-entering-timeout-handling.patch
+)
 source=(
   https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/${_srcname}.tar.{xz,sign}
   $url/releases/download/$_srctag/linux-$_srctag.patch.zst{,.sig}
 
-  # t2linux Patches
-  patches::git+https://github.com/t2linux/linux-t2-patches#commit=${T2_PATCH_HASH}
+  # t2linux
+  extra_config
+  "${_t2linux_patches[@]}"
 )
 source_x86_64=(config.x86_64)
 validpgpkeys=(
@@ -60,13 +92,65 @@ sha256sums=('fd0fc479f983a8c05313f13e9c36330fe6651cf725396748c40d5cd93fa1e6a4'
             'SKIP'
             '741d473c4db335d97d9e1d9b8be9337090522550804fe6454ba336d21e580fd6'
             'SKIP'
-            'd9fa9aa5045079877d6bb226ee718c09bea424f6a91a48358430e406efe1d1ac')
+            '731450366f53edd5ea5a02b4ff38bcc033d5b3a40ee8c566bf8e59283d6375fc'
+            'fd85730f98b8f518e009f15e7a97cb1f029cdc05b5f3ef430c26727cba23251c'
+            '89af362a8640e0acb0a9983b5d643b79ee8f7e1eb0ed79e10940a6d1b2911eb7'
+            '81360fed61d5fd0ba5a1b762d6735d62cbf509682433ca46bec08543eaef86bc'
+            '39ccdf7184af930da5059433663095e0b1d27ba0a7689d49f060648046e23979'
+            '155b4e097227239394aa94d50d5b19d6d68cc23df3f9ddcf7918239d04258c6e'
+            'd5f9e630fff7592cb626a8dd0afc6ef2d5a8b2108fafc7a21bab6d60afcdf560'
+            'dd2e81cf2a0f2e88ab7f202ee320f213d6988d462bffb7ad980bcddee2920cb1'
+            'f41ab6f1672a88e9de7f46ebe9b0133ae76bd55892a5a8d0b3b7efee8f138342'
+            'b67a5f999430f4a40dca5a4b7c667e5f42153fbf4081e0e84d5605eb25210912'
+            '0f92101c4f10168e3d9a751ac126aeef152c30590729acb28671d6e218be7d61'
+            'acb0eec9063301a5aebbfbba9d1455bc6770c9fa4bbe418fbb53a80fc292d28b'
+            '8f6463d4f5bf6c511887d2241a4906f5bf86dbb2003c2227c9df36f33e16135b'
+            'b2460a98bb09e8ee36ff020d2dc7195a8292d17855942d4d7f18b5124968c67b'
+            '46e608d2dfab32edbdc129154f8b2e609806cd2d59aee37f1c165690b8af943c'
+            '2cb673732b0b4ee42b4975976ddabb0004b17cc227428aa95b344d6402b0b3d9'
+            '9149dbb65ff9e1c8a1b1c8ab97d90fd06b28b7b6dd3f4ad82a58fa810d74864d'
+            '295e434e300bccdba0b3dd89ba6e9552dd3081b94affa3c6d4aa2ba2f1dc217d'
+            '1cb3d0d9dc1b7ac0d00c34a87155486429d35e5154815f04e86d8e844f05530c'
+            '97aa72564a6e994460a10fdfd6419fc38ed884cbae323a621e08cfe9037c74d1'
+            'fc428dec9b00c5ca4081f245b4fa7634b61a1aa434925f308c911789f4b32696'
+            '967c64d7aecc48430ebae186e35f6eb2b7ade0b259f26a0915e1d9dc97f4b3fb'
+            'd42623c546faf830885a37a022ea1338e54adb79b07ad7ae45e211159e93ea97'
+            'cc24deb45d8d3e1307d819273ee9a13f3dac7f6e97f4b72b6bbc4203747658c6'
+            '71a9853ef9c140c12b8d5adbb1d3cf7ec6f2cb9f70d1ed223e4551d49bb3bfca'
+            'a2290c0630f8832a93b37e75abb9d3cfa948eab26a39ed7f2dfc691c089e10eb'
+            '9af93ca7984458ddc22f561efe2f41713140de671bea307138b2612dab7571c8')
 sha256sums_x86_64=('f16adcb6dc1dc241ea90e23ca920697d00e4618df1b72d914ff15bc55ab4051f')
 b2sums=('36a455379876a3f452dce7347211ac34ddfda9a445b0b8c0ee92664429a8ea85d2f1a101126b6d748545aaf18e3534f8db53d6110952f3d5487d029ff0f9a800'
         'SKIP'
         '06f49715b71884a0cbad51ab4b526c1516926cb2429e7a6e485aa48ebf277811dec391ae2264501245654275a84af1df3780bf8bf8df755cf47670d6c9397703'
         'SKIP'
-        'd6e2e1fb810c2fdec46479e06a7db905106bb8b2ca72de815b377c6755ef07af6a85bfe8d5caf77cfd79153ed741debf379f63464a18b88f0234f7b551f7f784')
+        '8f707bf2aee32b09f3089d073f65cf8649d89a87abad3505432ae7e36143fd4442a5bc21a1fa37dbce361103a2bd97bf1843429548c60428448eb8f77cad406d'
+        '0ea25409043d6936b612cd02c0f071a0dd908b09d2e4ba41c1fc4724f217a9f44be8fe6c1a8f52f4dc71f1e8e89383592d9bb58b7be3f4bee5abb25b5e3fdb33'
+        'bafe5747a48484acb7382179e6feb327693fd610df0207325588a0127d53bc2150fed4e5b7aa29c48030bc632bfeacfa6f080c44b11f3c1d83f25ba21c10c712'
+        'd6fa775f88aaf88c20d3c2ffb5bd1a914035597877ffb11deee39c8d12cf0f4e4ce8901624556805883a750757919b4b3d66073e49f26ac37312eca00a86c5c1'
+        'e4bee7d95fb434060297e4e372bf5ebac129e66edea72ee5457e63a9e7dbfb160321662eb76e374e6d2d35fede1a5cedd82323e76239b5ecc092eb95ed1af25b'
+        'ff4342182885616569391a917c7eb1dae1126865f673fe7e90f5d78838d5ae70d019d51a2bdf60b0a47a6978ed252d9654dd9fbfc617ede6b47cadf977a2f1bc'
+        '5b44cfca238193325edc5e6899a91e3d11d6f4966298da3448a367c0198479e9a8a88cb2a0754a5c3963c07c9da09db7dc257b569e9f7e8f8ed4f43188433e37'
+        '21fc96ca4094ae64ef6b1a68dcfe5dd38714aea5252c8c51e72b0a4ace5536da567fc6d57a58fd5124e0792cd48703436224d0932550c2c1829a73a49b63a0e7'
+        '9a0e324928465f4e8c69f4d5fb3fce90f32f67ad829e1b34a6ca287803c062e20ab3173e7e0e23503ac2888451136ceca079783c70acb4185a56923d4d881798'
+        '1ddf2f04370301ddd85c62295cefc995e633dea2007d09f3d500847677a1e65cb9db2437c87a4b6ef7334891acc6add71504359c4bbe2176bbb47008e15ded16'
+        '2ce15b2e360a43f980f3bc1b1dd446f8411018e9a600a6d75d057499e31c207cd7b881a900077553a86c0c240c6d13a0c308c0ef184af9c115cc9c3419525465'
+        'c6091da98ab2074d4bc45058573766ac4b6a2598e101d61efe46d292c213611dc1ff0a8aaf82479102059327381a63d6d5a1459fa795ffc98a1bbe213feb18dc'
+        '6684ab8eb206de7830ca4387731166d7d241e0f1f0cb957d1f61c969ce79db34ed410c6c9792dd036444d446bb608e0e5aa6a7553a768025aff1bf2f1b8e1957'
+        'a81a77ef7739763feb9915c81f1c784c080dc83391909d6436b013c7d6937449808c53e5dec7599ce87bd0a190a21ccc45b603f8aaff19caf282cd7d02a56af1'
+        '013ba3fb613643b311ea962ef260647c81aa5ce54714b29382b90532b92a64218b33d86ae40d9044373bfe80aefad4b8b69969eb6c8be78464f844b039ac57ee'
+        '9cd3f58ebdcc42e42c2c09623adefbcb3db9f3b0f11104267f3299e2308553dce5d9c6a00479a5ab58989973631f552adaa4463a1522b47e25408de020a71d08'
+        'd573310eafe45f00c526bf9c3587b287a82bf800db489094c8d0f7d83cfd08f862b4c2883fda730ab80198d99d676c67e782235a34c82e2389c4ba54839be1f1'
+        '3a2daabba0098814f9e4024a95a53da67ea17569dbd781ded81dd7a5abfb7175e5d6ce74e33ace0136694928288d9b9f82e0b5835a20fb84e032a5fd294ddd31'
+        '4d7788127166a505ec67d0a1b59a4e0dda9fc4151d4a29013f7510d7a96c8f886431df9d5a6b71dfdaf32bd1343b88c6b51240b14b665f3a3a74dba390d3bce6'
+        'f736feec68fdb71bd9eadbd04d16fcbda5ce833686547aacc0e74af2c0174528a869f5a69a7faa4f7748c38b61740004c3d1a10180fcc075577bd279387b1c32'
+        'ff28d477fda066c7b0436a58e3fea72bdf8bef8e3dd73cb0a2ae0f6bad4115af1cb183640bf18a81a43a001cc21134b4f5b9faec90d827cac728bf54ca1bc2ca'
+        'c6b283207843c0b3110f1a802fdf6b7c6ad601204af101d1f0019b60ba2103ac915d73dc6c12b88efbc2d052bc17735601429a870d774160fd1dd5982154e9ed'
+        'cc75c6a869d6c7e5a5884ae1f2d2866254d74504d75c35ddbbcbb596f4a4e6083b5333448732c1079d6627c0e268ee24953e6cb6e8a9a8d0f631def6e2f9e259'
+        '43d628ec8f78ed2c9cdc968537c31ca79bab22efd9af0a2a4574443a8f0b2a983712b1edaac0a0c932eda9ffda1172156a6a576faa0bc48808bc846c931299e2'
+        '71d3ab3501ef35234edcf7df752b25f96b7628c2536bcd966171b2828334ed1bde1ff117dc25cbf3b6e25923bc797f7288bd80ba3783f58781d0f46f7c014007'
+        '8b40590a1851781302ad562614bf37838453560b58d9494b5e0fbf32fc404725d275d718222171c412f9945c9ac923a86e7199f81b3c7b0e3bdae29ad9bf2d7f'
+        '5d1698553cb8792e188311fb7b5a27c4ad36c40538cebe9e1afaf8dd34323f8526bbbc5278db10777459a9a7150498bf676b28185c94bbd64caabb2cefb899a3')
 b2sums_x86_64=('58babcf7bed396598de1a7c010292aebb56b2c726f9d8d28344049646d5ed814489db0e22a4e62718e5e6dcc94c581858c17b235e88dc3263fa78934d2a84104')
 
 # https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
@@ -91,14 +175,9 @@ prepare() {
     patch -Np1 < "../$src"
   done
 
-  for src in "$srcdir"/patches/*.patch; do
-    echo "Applying T2 patch ${src##*/}..."
-    patch -Np1 < "$src"
-  done
-
   echo "Setting config..."
   cp ../config.$CARCH .config
-  cat $srcdir/patches/extra_config >> .config
+  cat ../extra_config >> .config
   make olddefconfig
   # The installer relies on these modules for early keyboard input and audio.
   for symbol in T2BCE_CORE T2BCE_DMA T2BCE_VHCI T2BCE_AUDIO; do

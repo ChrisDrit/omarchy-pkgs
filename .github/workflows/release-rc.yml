@@ -215,6 +215,7 @@ jobs:
             echo "==> edge/$arch: $status"
             # Nothing newer than edge serves moves nothing; no slot to record.
             if [[ $status == failed ]] || ! grep -q 'nothing published' "edge-carry/$arch.log"; then
+              # shellcheck disable=SC2012 # makepkg's file names have no whitespace
               jq -nc --arg a "$arch" --arg st "$status" --arg files "$(ls edge-carry/$arch/*.pkg.tar.zst 2>/dev/null | tr '\n' ' ')" \
                 '{mirror:"edge", arch:$a, status:$st, packages:[$files | split(" ") | .[] | select(length>0) | sub(".*/";"") | sub("\\.pkg\\.tar\\.zst$";"")]}' >> slots.jsonl
             fi

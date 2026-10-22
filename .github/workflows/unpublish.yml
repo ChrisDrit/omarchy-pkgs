@@ -43,6 +43,7 @@ jobs:
           CHANNELS: ${{ github.event.inputs.channels }}
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2086 # $PACKAGES is a space-separated list of names
           bin/unpublish-plan --channels "$CHANNELS" $PACKAGES >>"$GITHUB_ENV"
 
       - name: Unpublish

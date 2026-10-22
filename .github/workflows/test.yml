@@ -58,6 +58,7 @@ jobs:
               bash tests/ipu7-install.sh
               bash tests/ipu7-headers.sh
               ./bin/sync-upstream self-test
+              ./tests/upstream-github-fetch.sh
               ./bin/sync-rebuilds --self-test
               ./bin/omarchy-pkgs self-test
               ./bin/omarchy-release self-test
@@ -69,6 +70,7 @@ jobs:
               ./tests/passwordless-package-files.sh
               ./tests/pinned-sources.sh
               ./tests/package-metadata.sh
+              ./tests/unpublish-plan.sh
               ./tests/fast-ring-check.sh
               ./tests/controller.sh
               ./tests/artifact-helpers.sh

@@ -1,19 +1,19 @@
 # Maintainer: Ryan Hughes <ryan@omarchy.org>
 pkgname='omarchy-dev'
-pkgver=4.0.0.r7052.ga6dcc31
+pkgver=4.0.0.r7234.g3c7027d
 pkgrel=1
 # Pinned by the upstream watch in .omarchy/package.json (bin/sync-upstream):
 # every quattro tip becomes a commit pin here, so the package is versioned,
 # checksummed and built exactly like a release, just more often. The r-number
 # is the branch's total commit count, not the distance from the last tag: the
 # published history used the total, and pacman must never see it go down.
-_commit=a6dcc31b6429fcf25e9e6bf90179f84c602cbf4e
+_commit=3c7027db2a4fa9fa6a49d7af7f87c27ac48e677d
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH (quattro branch tip)'
 # The payload is architecture-independent, but the dependency set is not: the
 # boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
 # and makepkg only honours arch-suffixed arrays on arch-specific packages.
 arch=('x86_64' 'aarch64')
-url='https://github.com/basecamp/omarchy'
+url='https://github.com/omacom/omarchy'
 license=('MIT')
 provides=('omarchy')
 conflicts=('omarchy')
@@ -80,8 +80,8 @@ makedepends=(
 # Source: the pinned quattro commit. Set OMARCHY_SRC=/path/to/checkout to
 # build from a local source tree instead (mirrors omarchy-zsh/omarchy-fish DX);
 # the arrays are emptied below so nothing is downloaded in that case.
-source=("omarchy::git+https://github.com/basecamp/omarchy.git#commit=${_commit}")
-sha256sums=('3644a3755652bb023ca37e785eba272d70c68b768a4f437f69fad8b9b79adb4d')
+source=("omarchy::git+https://github.com/omacom/omarchy.git#commit=${_commit}")
+sha256sums=('642d7c2a57f346bd7bcb89d36bee46bb0393d7c5d7d101dc966954940c088f4b')
 if [[ -n "${OMARCHY_SRC:-}" ]]; then
   source=()
   sha256sums=()

@@ -32,21 +32,24 @@ class KernelRecipeTests(unittest.TestCase):
     def test_shared_config_keeps_existing_machine_behaviour(self):
         package = ROOT / 'pkgbuilds/linux-aurora'
         recipe = (package / 'PKGBUILD').read_text()
-        self.assertIn('cp ../config build/base/.config', recipe)
-        self.assertIn("grep -qx 'CONFIG_RUST=y'", recipe)
+        helper = (package / 'configure.sh').read_text()
+        self.assertIn('source ../configure.sh', recipe)
+        self.assertIn('configure_kernel "$PWD/.." "$PWD/build/base"', recipe)
+        self.assertIn('cp "$config_dir/config" "$output_dir/.config"', helper)
+        self.assertIn("grep -qx 'CONFIG_RUST=y'", helper)
+        gate = (ROOT / 'tests/aurora-edge/configure.py').read_text()
+        self.assertIn('source "$1/configure.sh"', gate)
+        self.assertIn('configure_kernel "$2" "$3" "$4"', gate)
+        self.assertIn('resolve_kernel_config "$2" "$3" "$4"', gate)
+        self.assertIn('resolve_kernel_config "$config_dir" "$output_dir" "${3:-}" || return', helper)
         self.assertNotIn('j700.config', recipe)
         self.assertNotIn('j700-device-parity.config', recipe)
         original = (package / 'config').read_text()
-        fragment = (package / 'neo.config').read_text()
         for setting in ['CONFIG_USB4=m', 'CONFIG_DEBUG_INFO_BTF=y', 'CONFIG_KEXEC_FILE=y',
                         'CONFIG_RELR=y', 'CONFIG_RUST=y']:
             self.assertIn(setting, original)
-        for line in fragment.splitlines():
-            if line.startswith('CONFIG_'):
-                name = line.split('=', 1)[0]
-                self.assertNotIn('\n' + name + '=', original, 'Neo fragment overrides shared setting')
-                self.assertNotIn('# ' + name + ' is not set', original, 'Neo fragment flips shared disabled setting')
-        self.assertIn('CONFIG_MT7932_FULLMAC=m', fragment)
+        self.assertFalse((package / 'common.config').exists())
+        self.assertFalse((package / 'neo.config').exists())
 
     def test_generated_release_keeps_boot_bundle_suffix(self):
         recipe = ROOT / 'pkgbuilds/linux-aurora/PKGBUILD'
@@ -57,29 +60,24 @@ class KernelRecipeTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected, result.stderr)
         self.assertIn('_check_kernelrelease "$(<build/base/version)"', recipe.read_text())
 
-    def test_shared_capabilities_are_explicit_and_separate_from_neo_drivers(self):
+    def test_platform_choices_come_from_the_pinned_kernel(self):
         package = ROOT / 'pkgbuilds/linux-aurora'
-        common = (package / 'common.config').read_text()
-        expected = {'CONFIG_SERIAL_APPLE_DOCKCHANNEL', 'CONFIG_SERIAL_APPLE_DOCKCHANNEL_EARLYCON',
-                    'CONFIG_SYSFB_SIMPLEFB', 'CONFIG_DMABUF_HEAPS', 'CONFIG_DMABUF_HEAPS_SYSTEM',
-                    'CONFIG_UDMABUF', 'CONFIG_THERMAL_NETLINK', 'CONFIG_NVME_HWMON', 'CONFIG_TRUSTED_KEYS',
-                    'CONFIG_APPLE_SEP'}
-        self.assertEqual({line.split('=', 1)[0] for line in common.splitlines()
-                          if line.startswith('CONFIG_')}, expected)
         recipe = (package / 'PKGBUILD').read_text()
-        self.assertIn('../common.config ../neo.config', recipe)
-        self.assertIn('python3 ../validate-config.py ../common.config build/base/.config', recipe)
+        helper = (package / 'configure.sh').read_text()
+        self.assertNotIn('common.config', recipe)
+        self.assertNotIn('neo.config', recipe)
+        self.assertIn('fragments=(arch/arm64/configs/asahi.config)', helper)
+        self.assertIn('python3 "$config_dir/validate-config.py" arch/arm64/configs/asahi.config', helper)
+        self.assertFalse(any(line.startswith('CONFIG_') for line in helper.splitlines()))
 
     def test_trusted_keys_cannot_downgrade_the_builtin_sep_driver(self):
         package = ROOT / 'pkgbuilds/linux-aurora'
         spec = importlib.util.spec_from_file_location('sep_config_check', package / 'validate-config.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        fragment = package / 'common.config'
-        requested = module.values(fragment)
-        self.assertEqual(requested['CONFIG_TRUSTED_KEYS'], 'y')
-        self.assertEqual(requested['CONFIG_APPLE_SEP'], 'y')
         with tempfile.TemporaryDirectory() as temporary:
+            fragment = Path(temporary) / 'asahi.config'
+            fragment.write_text('CONFIG_TRUSTED_KEYS=y\nCONFIG_APPLE_SEP=y\n')
             resolved = Path(temporary) / 'config'
             resolved.write_text(fragment.read_text())
             module.validate(fragment, resolved)
@@ -96,12 +94,31 @@ class KernelRecipeTests(unittest.TestCase):
         spec.loader.exec_module(module)
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / 'config'
-            fragment = validator.with_name('neo.config')
+            fragment = Path(temporary) / 'asahi.config'
+            fragment.write_text('CONFIG_SND_SOC_APPLE_T8140_AOP_AUDIO=m\n')
             resolved.write_text(fragment.read_text())
             module.validate(fragment, resolved)
             resolved.write_text(fragment.read_text().replace(
                 'CONFIG_SND_SOC_APPLE_T8140_AOP_AUDIO=m', '# CONFIG_SND_SOC_APPLE_T8140_AOP_AUDIO is not set'))
             with self.assertRaisesRegex(ValueError, 'CONFIG_SND_SOC_APPLE_T8140_AOP_AUDIO'):
+                module.validate(fragment, resolved)
+
+    def test_inactive_parent_can_omit_a_requested_disabled_symbol(self):
+        validator = ROOT / 'pkgbuilds/linux-aurora/validate-config.py'
+        spec = importlib.util.spec_from_file_location('disabled_config_check', validator)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as temporary:
+            fragment = Path(temporary) / 'asahi.config'
+            fragment.write_text('# CONFIG_TRUSTED_KEYS_TPM is not set\nCONFIG_VIDEO_APPLE_ISP=m\n')
+            resolved = Path(temporary) / 'config'
+            resolved.write_text('CONFIG_VIDEO_APPLE_ISP=m\n')
+            module.validate(fragment, resolved)
+            resolved.write_text('CONFIG_TRUSTED_KEYS_TPM=y\nCONFIG_VIDEO_APPLE_ISP=m\n')
+            with self.assertRaisesRegex(ValueError, 'CONFIG_TRUSTED_KEYS_TPM'):
+                module.validate(fragment, resolved)
+            resolved.write_text('')
+            with self.assertRaisesRegex(ValueError, 'CONFIG_VIDEO_APPLE_ISP'):
                 module.validate(fragment, resolved)
 
     def test_headers_require_resolver_only_when_btf_enabled(self):
@@ -200,7 +217,7 @@ class FirmwareTests(unittest.TestCase):
             code = script.read_text().replace('/usr/bin/set-wireless-regdom', str(root / 'no-host-helper'))
             result = subprocess.run(['bash', '-c', code], text=True, capture_output=True, timeout=9,
                 env=dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'], FIXTURE=str(root),
-                         AURORA_REGDOM_POLICY_DIR=str(root / 'policy')))
+                         AURORA_FIRMWARE_ROOT=str(root / 'firmware')))
             self.assertNotEqual(result.returncode, 0, 'systemd must restart a dead event stream')
             self.assertEqual((root / 'calls').read_text().splitlines(), ['fallback'])
             self.assertEqual((root / 'country').read_text().strip(), '00')
@@ -232,7 +249,7 @@ esac
             process = subprocess.Popen(['bash', '-c', code], text=True, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, start_new_session=True,
                 env=dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'], FIXTURE=str(root),
-                         AURORA_REGDOM_POLICY_DIR=str(root / 'policy')))
+                         AURORA_FIRMWARE_ROOT=str(root / 'firmware')))
             try:
                 stdout, stderr = process.communicate(timeout=8)
             except subprocess.TimeoutExpired:
@@ -257,7 +274,7 @@ fall_back
 current=JP; fall_back
 [[ $calls == 2 && $SECONDS -ge 60 ]] || exit 11
 # A supported hint arriving during the delay must not be overwritten.
-touch "$policy/US.bin"
+mkdir -p "$firmware/mediatek/mt7932/policy"; touch "$firmware/mediatek/mt7932/policy/US.bin"
 sleep() { SECONDS=$((SECONDS+$1)); current=US; }
 current=PL; fall_back
 [[ $calls == 2 && $current == US ]] || exit 12
@@ -265,9 +282,29 @@ current=00; fall_back
 [[ $calls == 2 ]] || exit 13
 '''
         with tempfile.TemporaryDirectory() as temporary:
-            result = shell(code, env=dict(os.environ, AURORA_REGDOM_POLICY_DIR=temporary))
+            result = shell(code, env=dict(os.environ, AURORA_FIRMWARE_ROOT=temporary))
         self.assertEqual(result.returncode, 0, result.stderr)
 
+
+    def test_a_policy_extracted_into_vendor_firmware_keeps_its_country(self):
+        path = ROOT / 'pkgbuilds/omarchy-aurora-firmware/aurora-regdom-fallback'
+        # vendorfw puts per-machine files under vendor/, which the kernel's
+        # firmware loader searches first; a US policy there must keep US.
+        setup = path.read_text().split('\n# An initramfs')[0]
+        code = setup + '''
+calls=0; current=US
+sleep() { SECONDS=$((SECONDS+$1)); }
+iw() { if [[ $1 == reg && $2 == get ]]; then echo "country $current:"; else calls=$((calls+1)); current=00; fi; }
+mkdir -p "$firmware/vendor/mediatek/mt7932/policy"
+touch "$firmware/vendor/mediatek/mt7932/policy/US.bin"
+fall_back
+[[ $calls == 0 && $current == US ]] || exit 20
+current=PL; fall_back
+[[ $calls == 1 && $current == 00 ]] || exit 21
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            result = shell(code, env=dict(os.environ, AURORA_FIRMWARE_ROOT=temporary))
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 if __name__ == '__main__':
     unittest.main()

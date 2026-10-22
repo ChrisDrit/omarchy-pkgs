@@ -96,6 +96,9 @@ jobs:
             '
         env:
           PACKAGES: ${{ github.event.inputs.packages }}
+          # The job's own token, read-only and revoked when the job ends. It
+          # lifts the upstream providers' GitHub API calls off the 60-an-hour
+          # unauthenticated limit.
           UPSTREAM_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Group the pins into PRs
@@ -134,20 +137,3 @@ jobs:
         replaces it with the newer tip.
     secrets:
       PKGS_BOT_TOKEN: ${{ secrets.PKGS_BOT_TOKEN }}
-
-  notify:
-    needs: [track, prs]
-    if: ${{ failure() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Notify Basecamp on failure
-        if: ${{ env.BASECAMP_CHATBOT_URL != '' }}
-        env:
-          BASECAMP_CHATBOT_URL: ${{ secrets.BASECAMP_CHATBOT_URL }}
-        run: |
-          curl -s -o /dev/null \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg content \
-              "🔴 <strong>Branch tracking failed</strong><br><a href=\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\">View run</a>" \
-              '{content: $content}')" \
-            "$BASECAMP_CHATBOT_URL"

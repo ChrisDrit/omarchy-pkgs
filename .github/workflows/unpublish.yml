@@ -4,9 +4,9 @@ name: Unpublish retired packages
 # from master. Deleting a recipe stops it building; this stops pacman
 # offering it. Files stay in the bucket (see bin/unpublish-packages).
 #
-# Only entries no recipe on master builds: one that still has a recipe for
-# that architecture would come back on its next publish, and refusing it
-# keeps a typo from pulling a live package out of every channel. A recipe
+# Only entries no recipe on master publishes there (bin/unpublish-plan): one
+# a recipe still publishes would come back on its next publish, and refusing
+# it keeps a typo from pulling a live package out of every channel. A recipe
 # that dropped an architecture (pinta is aarch64-only) is retired from the
 # other one and kept where it still builds.
 
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       packages:
-        description: "Space-separated pkgbases whose recipes were removed from master, or no longer build for an architecture"
+        description: "Space-separated pkgbases whose recipes were removed from master or no longer build for an architecture"
         required: true
       channels:
         description: "Channels to remove them from"
@@ -37,35 +37,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Refuse packages that still have a recipe
+      - name: Plan what no recipe publishes
         env:
           PACKAGES: ${{ github.event.inputs.packages }}
           CHANNELS: ${{ github.event.inputs.channels }}
         run: |
           set -euo pipefail
-          for c in $CHANNELS; do
-            [[ $c == edge || $c == rc || $c == stable ]] || { echo "::error::Unknown channel: $c"; exit 1; }
-          done
-          source helpers/package-metadata.sh
-          declare -A retire=([x86_64]="" [aarch64]="")
-          for p in $PACKAGES; do
-            [[ $p =~ ^[a-z0-9@._+-]+$ ]] || { echo "::error::Not a package name: $p"; exit 1; }
-            kept=0
-            for arch in x86_64 aarch64; do
-              if [[ -e pkgbuilds/$p ]] && package_supports_arch "pkgbuilds/$p" "$arch"; then
-                echo "Keeping $p on $arch: pkgbuilds/$p still builds it"
-                kept=$((kept + 1))
-              else
-                retire[$arch]+=" $p"
-              fi
-            done
-            if (( kept == 2 )); then
-              echo "::error::pkgbuilds/$p still builds for every architecture; remove the recipe first"
-              exit 1
-            fi
-          done
-          echo "RETIRE_X86_64=${retire[x86_64]# }" >>"$GITHUB_ENV"
-          echo "RETIRE_AARCH64=${retire[aarch64]# }" >>"$GITHUB_ENV"
+          bin/unpublish-plan --channels "$CHANNELS" $PACKAGES >>"$GITHUB_ENV"
 
       - name: Unpublish
         env:
@@ -87,7 +65,7 @@ jobs:
           docker pull --quiet "$builder" || docker buildx build --load -t "$builder" --build-arg MIRROR=edge build
           for mirror in $CHANNELS; do
             for arch in x86_64 aarch64; do
-              var=RETIRE_${arch^^}
+              var=RETIRE_${mirror^^}_${arch^^}
               [[ -n ${!var} ]] || continue
               # shellcheck disable=SC2086 # RETIRE_<ARCH> is a space-separated list of names
               docker run --rm \

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check edge-only recipes and their declared compatibility upgrade versions."""
+"""Check the Aurora recipes and their declared compatibility upgrade versions."""
 import json
 import hashlib
 import os
@@ -72,11 +72,10 @@ class EdgeMetadataTests(unittest.TestCase):
                 self.assertIn(old, package[field])
             self.assertTrue(any(p.startswith(old + '=') for p in package['provides']))
 
-    def test_only_edge_and_no_automatic_source_tracking(self):
+    def test_no_automatic_source_tracking(self):
         for name in NAMES:
             with self.subTest(name=name):
                 value = json.loads((ROOT / 'pkgbuilds' / name / '.omarchy/package.json').read_text())
-                self.assertEqual(value['channels'], ['edge'])
                 self.assertFalse(value['sync'])
                 self.assertEqual(value['source'], 'local')
                 self.assertNotIn('release_ring', value)
@@ -101,6 +100,16 @@ class EdgeMetadataTests(unittest.TestCase):
         # which --printsrcinfo does not see.
         recipe = (ROOT / 'pkgbuilds' / 'linux-aurora' / 'PKGBUILD').read_text()
         self.assertNotIn('replaces=', recipe)
+
+    def test_kernel_ships_the_calibration_extractor_beside_aurora_touchid(self):
+        # The extractor is installed from the kernel's own tree. Its path must stay
+        # clear of aurora-touchid's copy so both packages can be installed at once.
+        recipe = (ROOT / 'pkgbuilds' / 'linux-aurora' / 'PKGBUILD').read_text()
+        self.assertIn('install -Dm755 tools/aurora-sep/extract-mesa-calibration.py', recipe)
+        self.assertIn('"$pkgdir/usr/lib/linux-aurora/extract-mesa-calibration"', recipe)
+        self.assertNotIn('/usr/lib/aurora-touchid/', recipe)
+        self.assertIn('python -I tools/aurora-sep/tests/test_extract_mesa_calibration.py', recipe)
+        self.assertIn('python: extract-mesa-calibration, for Touch ID', recipe)
 
     def test_every_recipe_is_apple_silicon_only(self):
         for name in NAMES:

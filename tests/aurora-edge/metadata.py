@@ -38,7 +38,8 @@ class EdgeMetadataTests(unittest.TestCase):
             'aura': ['asahi-scripts>=20260127.1', 'uboot-aurora'],
             'm1n1-aurora': ['asahi-scripts>=20260127.1', 'uboot-asahi'],
             'aurora-audio': ['alsa-ucm-conf-aurora', 'pipewire-audio', 'wireplumber',
-                             'bankstown', 'lsp-plugins-lv2', 'speakersafetyd', 'speakerguardd'],
+                             'bankstown', 'lsp-plugins-lv2', 'triforce-lv2>=0.2.0',
+                             'speakersafetyd', 'speakerguardd'],
             'omarchy-aurora-firmware': ['bash', 'iw', 'kmod', 'omarchy-mac-boot',
                                        'wireless-regdb', 'linux-aurora>=7.1.12.aurora5'],
         }

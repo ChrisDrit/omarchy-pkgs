@@ -4,7 +4,7 @@
 pkgname=omarchy-mac
 # pkgver matches omarchy-mac/version at _commit. Bump pkgrel to re-pin or
 # rebuild the same add-on version; reset it to 1 when pkgver increases.
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc='Apple Silicon configuration and support services for Omarchy'
 arch=('aarch64')
@@ -18,9 +18,9 @@ license=('MIT')
 makedepends=('git' 'findutils')
 checkdepends=('diffutils' 'python' 'systemd')
 # An exact omarchy-mac-pkgs main commit, never a branch.
-_commit=df9831a67a14c2e4ad4946f2b4fdaf297b49be6d
+_commit=f2f65b14fab776e6fab225f60faaa937e1f97db9
 source=("omarchy-mac-pkgs::git+https://github.com/omacom/omarchy-mac-pkgs.git#commit=${_commit}")
-sha256sums=('e2b3ae3df2612c473426cca30f06943c95ce80862d40eca94a319d7c689bf154')
+sha256sums=('e8e3f0cf7bde76651eb39e68d8ff66f3bf743be72773df3e2a0f5e0915a44c66')
 
 prepare() {
   # Tests and staging must not be able to read the other package's tree.

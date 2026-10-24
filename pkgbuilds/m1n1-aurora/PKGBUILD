@@ -1,7 +1,7 @@
 # omacom/m1n1; ordinary updates refresh ESP Stage 2, never enroll Stage 1.
 pkgname=m1n1-aurora
 pkgver=1.6.1.aurora20
-pkgrel=3
+pkgrel=4
 pkgdesc='Omarchy Apple Silicon bootloader from omacom/m1n1'
 arch=('aarch64')
 groups=('omarchy-platform-apple-silicon')
@@ -13,11 +13,11 @@ conflicts=('m1n1' 'aura' 'm1n1-neo')
 replaces=('aura' 'm1n1-neo')
 makedepends=('git' 'clang' 'lld' 'llvm' 'rustup' 'make' 'python')
 options=('!strip' '!debug')
-_commit=76194672cd873db0c32f98037d3b160874ea3863
+_commit=f5a82fdb6264edd2fb0c02e2d0f750bf33380854
 source=("m1n1::git+$url.git#commit=$_commit"
         build-qualification.json validate-qualification.py
         bootlogo_48.bin bootlogo_128.bin bootlogo_256.bin)
-sha256sums=('SKIP' '7df2324b48506b345045d2ffa09ed6cd6dd5921a93be5109670df6d12c513b0b'
+sha256sums=('SKIP' '4f710aac2a6a4dc2b637d5a71bf7c248bdf027d933665d20cfe998baa36e1186'
             '43578b83ebea180319b64c9b63377dab6148e997e6f75fd4abcb325484f7ca95'
             '6668050653645711ad7523fe2abeb4cbe85a92c875f3eec754b6db23cea2191c'
             'b19cb017645c7a9068ea0be9b6bb394131d7ca11b28093cf6caa1ffca74b0a4e'

@@ -1,8 +1,8 @@
 # m1n1-aurora
 
 Build the canonical Aurora bootloader package from an immutable omacom/m1n1
-commit. The current candidate is 76194672cd873db0c32f98037d3b160874ea3863
-(merged source PRs #6, #7, #8, #10, #12 and #13), with Clang/lld, Rust 1.89.0 and
+commit. The current candidate is f5a82fdb6264edd2fb0c02e2d0f750bf33380854
+(merged source PRs #6, #7, #8, #10, #12, #13 and #14), with Clang/lld, Rust 1.89.0 and
 `-Os`. The package's existing 48/128/256 artwork is unchanged. The former USB4
 alias patch is already in the source; the APFS preboot UUID handoff proposed in
 omarchy-pkgs #1485 is also present upstream, so neither needs a local patch.

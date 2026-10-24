@@ -1,12 +1,12 @@
 pkgname=uboot-aurora
-pkgver=2026.07.aurora2
-pkgrel=3
+pkgver=2026.07.aurora3
+pkgrel=1
 pkgdesc='Aurora common Apple Silicon U-Boot with Neo MTP handoff (Omarchy build: silent console)'
 arch=('aarch64')
 groups=('omarchy-platform-apple-silicon')
 url='https://github.com/aurora-silicon/u-boot'
 license=('GPL-2.0-or-later')
-_commit=0cb6fed6a10512d1013a4a80b6d83c3d56140f2f
+_commit=7680260272f3612a13f0c9a6c7bfbc5e9ba7ce8c
 provides=("uboot-asahi=$pkgver")
 conflicts=('uboot-asahi' 'uboot-asahi-j700')
 replaces=('uboot-asahi-j700')

@@ -1,6 +1,6 @@
 pkgname=uboot-aurora
 pkgver=2026.07.aurora2
-pkgrel=2
+pkgrel=3
 pkgdesc='Aurora common Apple Silicon U-Boot with Neo MTP handoff (Omarchy build: silent console)'
 arch=('aarch64')
 groups=('omarchy-platform-apple-silicon')
@@ -29,7 +29,14 @@ prepare() {
     -e SILENT_U_BOOT_ONLY \
     -d VIDEO_LOGO \
     --set-val BOOTDELAY 0
+  # asahi-alarm's uefi-enable-SetVariableRT-with-volotile-storage.patch, as
+  # config: SetVariable at runtime in RAM, with the file store named through
+  # RTStorageVolatile/VarToFile. Without it efivarfs is read-only, so
+  # systemctl reboot --boot-loader-menu (Reboot to Boot Menu) cannot ask
+  # Limine for its menu. The file store it depends on is already the default.
+  scripts/config --file build-aurora/.config -e EFI_RT_VOLATILE_STORE
   make O=build-aurora CROSS_COMPILE="${CROSS_COMPILE:-}" PYTHON3=/usr/bin/python3 olddefconfig
+  grep -qx 'CONFIG_EFI_RT_VOLATILE_STORE=y' build-aurora/.config
 }
 build() {
   cd u-boot

@@ -13,11 +13,10 @@ pkgname='omarchy'
 _tag='v4.0.6'
 _commit='237f1b4071a0bff2296c6d740ba2b9fd695ebfa0'
 pkgver=4.0.6
-pkgrel=1
+pkgrel=2
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH'
-# The payload is architecture-independent, but the dependency set is not: the
-# boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
-# and makepkg only honours arch-suffixed arrays on arch-specific packages.
+# Native helpers and the boot dependencies are architecture-specific.
+# makepkg only honours arch-suffixed arrays on arch-specific packages.
 arch=('x86_64' 'aarch64')
 url='https://github.com/omacom/omarchy'
 license=('MIT')
@@ -53,6 +52,7 @@ depends=(
   'jq'
   'git'
   'perl' # /usr/bin/omarchy-shell invokes perl directly
+  'curl' # Native speed-test helper uses the system libcurl
 
   # Update availability checks (checkupdates from pacman-contrib uses fakeroot)
   'fakeroot'
@@ -87,6 +87,8 @@ depends_aarch64=(
 
 makedepends=(
   'git'
+  'rust'
+  'pkgconf'
 )
 
 # Source: the pinned release commit; set OMARCHY_SRC=/path/to/checkout to
@@ -105,10 +107,29 @@ prepare() {
     mkdir -p "$srcdir/omarchy"
     cp -a "${OMARCHY_SRC}/." "$srcdir/omarchy/"
   fi
+  if [[ -f $srcdir/omarchy/tools/speedtest/Cargo.toml ]]; then
+    export CARGO_HOME="$srcdir/cargo"
+    cargo fetch --locked --manifest-path "$srcdir/omarchy/tools/speedtest/Cargo.toml"
+  fi
+
+}
+
+build() {
+  # Old release pins still ship the shell helper. Build the native helper as
+  # soon as the pinned source contains it; never ship a launcher without it.
+  if [[ -f $srcdir/omarchy/tools/speedtest/Cargo.toml ]]; then
+    export CARGO_HOME="$srcdir/cargo"
+    cargo build --offline --locked --release --target-dir "$srcdir/speedtest-target" \
+      --manifest-path "$srcdir/omarchy/tools/speedtest/Cargo.toml"
+  fi
 }
 
 package() {
   cd "$srcdir/omarchy"
+
+  if [[ -f tools/speedtest/Cargo.toml ]]; then
+    install -Dm755 "$srcdir/speedtest-target/release/omarchy-speedtest" "$pkgdir/usr/lib/omarchy/speedtest"
+  fi
 
   # Sources with the grant revocation hook move the temporary passwordless
   # sudo command and its library to omarchy-settings. Conditional until no

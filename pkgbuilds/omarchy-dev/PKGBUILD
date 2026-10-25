@@ -1,7 +1,7 @@
 # Maintainer: Ryan Hughes <ryan@omarchy.org>
 pkgname='omarchy-dev'
 pkgver=4.0.0.r7289.gd52d57c
-pkgrel=1
+pkgrel=2
 # Pinned by the upstream watch in .omarchy/package.json (bin/sync-upstream):
 # every quattro tip becomes a commit pin here, so the package is versioned,
 # checksummed and built exactly like a release, just more often. The r-number
@@ -9,9 +9,8 @@ pkgrel=1
 # published history used the total, and pacman must never see it go down.
 _commit=d52d57c378e5ff1136609c446e6027b752255907
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH (quattro branch tip)'
-# The payload is architecture-independent, but the dependency set is not: the
-# boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
-# and makepkg only honours arch-suffixed arrays on arch-specific packages.
+# Native helpers and the boot dependencies are architecture-specific.
+# makepkg only honours arch-suffixed arrays on arch-specific packages.
 arch=('x86_64' 'aarch64')
 url='https://github.com/omacom/omarchy'
 license=('MIT')
@@ -41,6 +40,7 @@ depends=(
   'jq'
   'git'
   'perl' # /usr/bin/omarchy-shell invokes perl directly
+  'curl' # Native speed-test helper uses the system libcurl
 
   # Update availability checks (checkupdates from pacman-contrib uses fakeroot)
   'fakeroot'
@@ -75,6 +75,8 @@ depends_aarch64=(
 
 makedepends=(
   'git'
+  'rust'
+  'pkgconf'
 )
 
 # Source: the pinned quattro commit. Set OMARCHY_SRC=/path/to/checkout to
@@ -93,6 +95,21 @@ prepare() {
     mkdir -p "$srcdir/omarchy"
     cp -a "${OMARCHY_SRC}/." "$srcdir/omarchy/"
   fi
+  if [[ -f $srcdir/omarchy/tools/speedtest/Cargo.toml ]]; then
+    export CARGO_HOME="$srcdir/cargo"
+    cargo fetch --locked --manifest-path "$srcdir/omarchy/tools/speedtest/Cargo.toml"
+  fi
+
+}
+
+build() {
+  # Old release pins still ship the shell helper. Build the native helper as
+  # soon as the pinned source contains it; never ship a launcher without it.
+  if [[ -f $srcdir/omarchy/tools/speedtest/Cargo.toml ]]; then
+    export CARGO_HOME="$srcdir/cargo"
+    cargo build --offline --locked --release --target-dir "$srcdir/speedtest-target" \
+      --manifest-path "$srcdir/omarchy/tools/speedtest/Cargo.toml"
+  fi
 }
 
 package() {
@@ -104,6 +121,10 @@ package() {
   depends+=('omarchy-themes-intros')
 
   cd "$srcdir/omarchy"
+
+  if [[ -f tools/speedtest/Cargo.toml ]]; then
+    install -Dm755 "$srcdir/speedtest-target/release/omarchy-speedtest" "$pkgdir/usr/lib/omarchy/speedtest"
+  fi
 
   # Runtime binaries — ship everything in bin/ except the debug helpers
   # that ship from omarchy-settings (needed before omarchy is installed,

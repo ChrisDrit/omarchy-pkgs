@@ -122,6 +122,10 @@ hand:
 Changes to `bin/`, `helpers/`, `build/` or the workflows go in a separate PR,
 first: a PR's packages are built with `master`'s tooling, not its own.
 
+### Native speed-test helper
+
+The `omarchy` and `omarchy-dev` recipes build `tools/speedtest` when the pinned source contains it and install the helper at `/usr/lib/omarchy/speedtest`. Rust is a build dependency; the installed helper uses the system libcurl. Dependencies are fetched with the lockfile during preparation, and compilation runs offline. Older source pins without the native helper keep their existing shell implementation.
+
 ## How a package reaches users
 
 ```

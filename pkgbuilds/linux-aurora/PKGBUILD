@@ -9,13 +9,13 @@
 # cold-boot qualification on M1 and M2.
 
 _auroraver=7.2.11
-_aurorarel=7
+_aurorarel=8
 pkgrel=1
 
 # Immutable pin on omacom/linux-aurora (branch integration/aurora). Every bump is a
 # PR that moves _commit; its cold-boot qualification is recorded in
 # the PR's attached qualification evidence before channel publication.
-_commit=d13466ebb8b5f2e2af3d2c8359f4c96e711a5679
+_commit=937b727ef9a3a9ff09489d597ef4b28f3b6fdbfa
 
 # Any m1n1 1.6.1 loads these device trees. The Neo's own Stage 2 comes from the
 # image, so the floor stays where M1 and M2 users' m1n1-aurora already meets it.

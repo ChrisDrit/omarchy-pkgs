@@ -8,7 +8,7 @@
 pkgbase=linux-omarchy-aarch64
 _kernel=linux-omarchy
 pkgver=7.3
-pkgrel=1
+pkgrel=2
 pkgdesc='Omarchy Linux for aarch64 (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -97,7 +97,6 @@ source=(
   0565-i2c-asue140d-touchpad-100khz.patch{,.sig}
   0566-hid-asus-no-keyboard-init-reports-to-touchpads.patch{,.sig}
   0567-hid-magicmouse-null-deref-without-input-device.patch{,.sig}
-  0568-hid-updates.patch
   0572-hid-asus-worker-teardown.patch{,.sig}
   0605-thunderbolt-pcie-rescan-after-tunnel.patch{,.sig}
   0608-thunderbolt-fixes-3.patch
@@ -361,7 +360,6 @@ sha256sums=('87363c24f10e06321eb362765521094e94471f6bff8bce2d6b3e40f39f004953'
             'SKIP'
             'e8620ff5c3c82f98a3a0e7c3d4845b2c1277f74b43141a3ae57630a5ed8af23f'
             'SKIP'
-            '98b3ef0b37472514215dbee7b6acf6acee0eba55ee9cd87b5ddadebe818324da'
             '2487ac0386a6df389ef685a79c5fd60242a040a5af77ba5e58ff099e7ff5ce60'
             'SKIP'
             'ef66f6c32ac98a311b7437265b21a8c70746f1ea4dfbe28aff655e778d09c28b'
@@ -656,7 +654,6 @@ b2sums=('b7fb8c74de664fdd0cd7b42afff2720bda5c4bdb2ffffa80a745c5fecd029c6fe739a3e
         'SKIP'
         '910eba8f5eae43810aba2fc31892b8e75c86489756e2677f93757cb16225a3c95478966e686da8616bd17d12b3e7831f57541722b4b0c1a9864cf97dac0c6a97'
         'SKIP'
-        'e4a2954c766950bc4b83338962549d4f5000302072fb8e420fbabfae99bdd90204883c57a3da551afceda275fc70441de31ccf2fe7cfb2733be949119c40e1ab'
         '50e1f7ab0fc2e2ad6d1943c4576fa9f46c2b5a470e16d33e4100a18414fb27f4bed7d34c7227e38fcc05b63ec97f7d9c60d7ab47ed87f5b4447b00c5d37ae279'
         'SKIP'
         'bf138fd2ba2618ae9ff64838706c2212b478513e04b54ca3bdd8bf97292a8a310d73e0cd96533be62f139b645d7ac5de22a4c3bc1fd9f67e807bb862e965ea08'

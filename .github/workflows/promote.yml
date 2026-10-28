@@ -126,7 +126,8 @@ jobs:
             chmod 0666 "$RUNNER_TEMP/promote/preflight.jsonl"
             for arch in x86_64 aarch64; do
               if ! run "$arch" preflight.jsonl --dry-run; then
-                jq -c 'select(.type == "mac-set")' "$RUNNER_TEMP/promote/preflight.jsonl" >> "$RUNNER_TEMP/promote/record.jsonl"
+                # The refused plan, so the record shows what would have moved.
+                cat "$RUNNER_TEMP/promote/preflight.jsonl" >> "$RUNNER_TEMP/promote/record.jsonl"
                 exit 1
               fi
             done

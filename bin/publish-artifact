@@ -67,13 +67,14 @@ mkdir -p "$WORK/repo"
 # complete database with one containing only this batch.
 listing=$(remote_listing "$DEST") || exit 1
 before=0 files_before=0
-if grep -q '^omarchy.db.tar.zst$' <<<"$listing"; then
-  rclone copy "$DEST/omarchy.db.tar.zst" "$WORK/repo" --s3-no-head
+if grep -qx 'omarchy.db' <<<"$listing"; then
+  # What pacman is served, not the archive beside it (upload_database).
+  rclone copyto "$DEST/omarchy.db" "$WORK/repo/omarchy.db.tar.zst" --s3-no-head
   # repo-add rebuilds the files database from what it is given, so one the
   # channel serves but this run could not pull would go back up holding only
   # this batch.
-  if grep -q '^omarchy.files.tar.zst$' <<<"$listing"; then
-    rclone copy "$DEST/omarchy.files.tar.zst" "$WORK/repo" --s3-no-head
+  if grep -qx 'omarchy.files' <<<"$listing"; then
+    rclone copyto "$DEST/omarchy.files" "$WORK/repo/omarchy.files.tar.zst" --s3-no-head
     [[ -s "$WORK/repo/omarchy.files.tar.zst" ]] || { print_error "Could not pull the files database from $DEST"; exit 1; }
   fi
   [[ -s "$WORK/repo/omarchy.db.tar.zst" ]] || { print_error "Could not pull the database from $DEST"; exit 1; }
@@ -108,6 +109,7 @@ if [[ -f "$WORK/repo/omarchy.db.tar.zst" ]]; then
     fi
   done
   if (( ${#keep[@]} == 0 )); then
+    sync_archives "$DEST" || exit 1
     print_success "Nothing newer than what $DEST serves; nothing published"
     exit 0
   fi
@@ -170,5 +172,5 @@ for f in "${FILES[@]}"; do
   b=$(basename "$f")
   grep -qxF "$b" <<<"$listing" && grep -qxF "$b.sig" <<<"$listing" || { print_error "Upload incomplete: $b"; exit 1; }
 done
-rclone copy "$WORK/repo" "$DEST" --s3-no-head --checksum --copy-links --filter '+ omarchy.db*' --filter '+ omarchy.files*' --filter '- *'
+upload_database "$WORK/repo" "$DEST"
 print_success "Published ${#FILES[@]} package(s) to $DEST"

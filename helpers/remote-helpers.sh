@@ -34,3 +34,30 @@ db_entries() {
   list=$(bsdtar -tf "$1") || { print_error "Cannot read the database $1" >&2; return 1; }
   grep -c '/$' <<<"$list" || true
 }
+
+# pacman reads omarchy.db and omarchy.files. The repo-add archives beside them
+# (omarchy.db.tar.zst, omarchy.files.tar.zst) hold the same bytes but are
+# separate objects on the remote, so an upload that stopped part way can leave
+# the two apart. The tools that write a channel start from the names pacman
+# reads, and upload_database <local dir> <remote dir> writes those first and
+# the archives after them. A run that stops in between leaves the archives
+# behind what is served, never ahead: the release tooling, which reads the
+# archives, may wait for a version that is already out but never takes one
+# for served that is not. Every run that finds nothing to write calls
+# sync_archives, so a retry brings the archives back in step.
+upload_database() {
+  rclone copy "$1" "$2" --s3-no-head --checksum --copy-links --filter '+ omarchy.db' --filter '+ omarchy.files' --filter '- *'
+  rclone copy "$1" "$2" --s3-no-head --checksum --filter '+ omarchy.db.tar.zst*' --filter '+ omarchy.files.tar.zst*' --filter '- *'
+}
+
+# sync_archives <remote dir>: copy what pacman is served over the archives
+# beside it, on the remote. Objects that already match are skipped, so a
+# channel in step writes nothing.
+sync_archives() {
+  local listing name
+  listing=$(remote_listing "$1") || return 1
+  for name in omarchy.db omarchy.files; do
+    grep -qx "$name" <<<"$listing" || continue
+    rclone copyto "$1/$name" "$1/$name.tar.zst" --s3-no-head --checksum || return 1
+  done
+}

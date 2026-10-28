@@ -78,6 +78,7 @@ promote --dry-run && [[ "$(entries rc)" == "$rc_before" ]] \
   && [[ $(plan_action alpha) == promote && $(plan_action split-extra) == promote ]] \
   && pass "dry run plans the promotion and publishes nothing" || fail "dry run"
 
+cp "$REMOTE/rc/x86_64/omarchy.db.tar.zst" "$T/rc-archive-before"
 : > "$T/record"
 promote || fail "promotion failed"
 [[ "$(entries rc)" == "ahead-1.0-3 alpha-1.0-2 big-1.0-1 fast-1.0-1 pinned-1.0-1 split-1.0-1 split-extra-1.0-1 " ]] \
@@ -96,9 +97,14 @@ cmp -s "$REMOTE/edge/x86_64/alpha-1.0-2-x86_64.pkg.tar.zst" "$REMOTE/rc/x86_64/a
 jq -e -s '[.[] | select(.type=="slot")] | length == 1 and .[0].status == "published" and (.[0].packages | index("split-extra-1.0-1-x86_64"))' "$T/record" >/dev/null \
   && pass "the record names every published package in its slot" || fail "slot record: $(cat "$T/record")"
 
+# As if that promotion's upload had stopped after the served database but
+# before the archive: the retry finds nothing to promote and brings the
+# archive back in step, where the release tooling reads it.
+cp "$T/rc-archive-before" "$REMOTE/rc/x86_64/omarchy.db.tar.zst"
 : > "$T/record"
 promote && grep -q 'already up to date' "$T/out" && [[ $(plan_action alpha) == current ]] \
-  && pass "a second run finds nothing to do" || fail "rerun"
+  && cmp -s "$REMOTE/rc/x86_64/omarchy.db" "$REMOTE/rc/x86_64/omarchy.db.tar.zst" \
+  && pass "a second run finds nothing to do and brings the archive back in step" || fail "rerun"
 
 # Batches split between pkgbases, never inside one; each batch is a slot.
 pub edge $(mkpkg alpha 3) $(mkpkg split 2 split-extra) $(mkpkg big 2)
@@ -157,7 +163,7 @@ fi
 mkdir -p "$T/undownloadable-rc"
 cat > "$T/undownloadable-rc/rclone" <<'EOF_RCLONE'
 #!/bin/bash
-if [[ $1 == copyto && $2 == */rc/*/omarchy.db.tar.zst ]]; then
+if [[ $1 == copyto && $2 == */rc/*/omarchy.db ]]; then
   echo 'simulated download failure' >&2
   exit 7
 fi
@@ -178,11 +184,12 @@ else grep -q 'refusing edge -> stable' "$T/out" && pass "channels only move one 
 # package goes) is readable; it simply holds nothing yet.
 mkdir -p "$REMOTE/stable/x86_64"
 bsdtar -cf - -T /dev/null | zstd -q > "$REMOTE/stable/x86_64/omarchy.db.tar.zst"
+cp "$REMOTE/stable/x86_64/omarchy.db.tar.zst" "$REMOTE/stable/x86_64/omarchy.db"
 : > "$T/record"
 "$BIN/promote-channel" --remote "$REMOTE" --from rc --to stable --arch x86_64 --record "$T/record" --dry-run >"$T/out" 2>&1 \
   && [[ $(plan_action pinned) == promote ]] \
   && pass "a destination with an empty database plans like an empty channel" || fail "empty destination database"
-rm "$REMOTE/stable/x86_64/omarchy.db.tar.zst"
+rm "$REMOTE/stable/x86_64/omarchy.db.tar.zst" "$REMOTE/stable/x86_64/omarchy.db"
 
 # rc -> stable: pinned packages move there (stable gets the release pair by
 # promotion); fast-ring ones are published at merge.

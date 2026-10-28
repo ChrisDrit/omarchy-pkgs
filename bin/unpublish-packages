@@ -48,20 +48,22 @@ mkdir -p "$WORK/repo"
 # A listing that failed is not an empty channel: stop rather than report that
 # there is nothing to remove while the packages stay served.
 listing=$(remote_listing "$DEST") || exit 1
-if ! grep -q '^omarchy.db.tar.zst$' <<<"$listing"; then
+if ! grep -qx 'omarchy.db' <<<"$listing"; then
   print_info "No database at $DEST; nothing to remove"
   exit 0
 fi
-rclone copy "$DEST/omarchy.db.tar.zst" "$WORK/repo" --s3-no-head
+# What pacman is served, not the archive beside it (upload_database).
+rclone copyto "$DEST/omarchy.db" "$WORK/repo/omarchy.db.tar.zst" --s3-no-head
 # repo-remove rewrites the files database too, so one the channel serves but
 # this run could not pull would go back up without the rest of the channel.
-if grep -q '^omarchy.files.tar.zst$' <<<"$listing"; then
-  rclone copy "$DEST/omarchy.files.tar.zst" "$WORK/repo" --s3-no-head
+if grep -qx 'omarchy.files' <<<"$listing"; then
+  rclone copyto "$DEST/omarchy.files" "$WORK/repo/omarchy.files.tar.zst" --s3-no-head
   [[ -s "$WORK/repo/omarchy.files.tar.zst" ]] || { print_error "Could not pull the files database from $DEST"; exit 1; }
 fi
 before=$(db_entries "$WORK/repo/omarchy.db.tar.zst")
 print_info "Pulled current database ($before entries)"
 if (( before == 0 )); then
+  sync_archives "$DEST" || exit 1
   print_info "$MIRROR/$ARCH serves nothing; nothing to remove"
   exit 0
 fi
@@ -72,6 +74,7 @@ names=$(bsdtar -xOf "$WORK/repo/omarchy.db.tar.zst" --include '*/desc' |
     /^%NAME%$/ { getline name }
     /^%BASE%$/ { getline base; if (index(bases, " " base " ")) print name }')
 if [[ -z "$names" ]]; then
+  sync_archives "$DEST" || exit 1
   print_info "None of ${BASES[*]} is in $MIRROR/$ARCH; nothing to remove"
   exit 0
 fi
@@ -88,5 +91,5 @@ after=$(db_entries "$WORK/repo/omarchy.db.tar.zst")
 print_info "Database now has $after entries"
 
 # --- 4. upload the database -------------------------------------------------
-rclone copy "$WORK/repo" "$DEST" --s3-no-head --checksum --copy-links --filter '+ omarchy.db*' --filter '+ omarchy.files*' --filter '- *'
+upload_database "$WORK/repo" "$DEST"
 print_success "Removed ${#NAMES[@]} package(s) from $DEST"

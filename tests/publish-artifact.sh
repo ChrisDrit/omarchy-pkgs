@@ -84,7 +84,8 @@ pub "$A1" && grep -q 'already serves alpha 1.0-2' "$T/out" && [[ "$(entries)" ==
   && pass "an older version never takes the channel backwards" || fail "older version published"
 
 drop_alpha() {
-  ( cd "$REMOTE/edge/x86_64" && repo-remove --quiet omarchy.db.tar.zst alpha >/dev/null 2>&1 )
+  ( cd "$REMOTE/edge/x86_64" && repo-remove --quiet omarchy.db.tar.zst alpha >/dev/null 2>&1 &&
+    rm omarchy.db omarchy.files && cp omarchy.db.tar.zst omarchy.db && cp omarchy.files.tar.zst omarchy.files )
   [[ "$(entries)" == "beta-1.0-1/ " ]] || fail "fixture: could not drop alpha from the db"
 }
 
@@ -128,7 +129,7 @@ E1=$(mkpkg epsilon 1 any)
 mkdir -p "$T/no-files-db"
 cat > "$T/no-files-db/rclone" <<'EOF_RCLONE'
 #!/bin/bash
-if [[ $1 == copy && $2 == */omarchy.files.tar.zst ]]; then
+if [[ $1 == copy* && $2 == */omarchy.files* ]]; then
   echo 'simulated download failure' >&2
   exit 7
 fi
@@ -187,10 +188,46 @@ unpub alpha delta && [[ "$(db_count db)" == 0 && "$(db_count files)" == 0 ]] \
 unpub alpha && grep -q 'nothing to remove' "$T/out" \
   && pass "unpublishing from an empty database removes nothing" || fail "unpublish from an empty database"
 # A truncated, zero-byte database is not an empty one.
-cp "$REMOTE/edge/x86_64/omarchy.db.tar.zst" "$T/empty.db.tar.zst"
-: > "$REMOTE/edge/x86_64/omarchy.db.tar.zst"
+cp "$REMOTE/edge/x86_64/omarchy.db" "$T/empty.db.tar.zst"
+: > "$REMOTE/edge/x86_64/omarchy.db"
 if unpub alpha; then fail "a zero-byte database must not read as empty"; fi
 grep -q 'zero bytes' "$T/out" && pass "a zero-byte database is refused, not read as empty" || fail "zero-byte database"
-cp "$T/empty.db.tar.zst" "$REMOTE/edge/x86_64/omarchy.db.tar.zst"
+cp "$T/empty.db.tar.zst" "$REMOTE/edge/x86_64/omarchy.db"
 pub "$B1" && [[ "$(entries)" == "beta-1.0-1/ " && "$(db_count files)" == 1 ]] \
   && pass "a package publishes into an empty database" || fail "publish into an empty database"
+
+# pacman reads omarchy.db; the omarchy.db.tar.zst archive beside it is a
+# separate object on the remote. A run that stopped part way through its
+# upload can leave the archive behind what is served, and the next publish
+# must build on what is served, not shrink it to the archive.
+served() { bsdtar -tf "$REMOTE/edge/x86_64/omarchy.db" | grep '/$' | sort | tr '\n' ' '; }
+cp "$REMOTE/edge/x86_64/omarchy.db.tar.zst" "$T/behind.db.tar.zst"
+pub "$D1" && [[ "$(served)" == "beta-1.0-1/ delta-1.0-1/ " ]] || fail "fixture: could not publish delta"
+cp "$T/behind.db.tar.zst" "$REMOTE/edge/x86_64/omarchy.db.tar.zst"
+pub "$A3" && [[ "$(served)" == "alpha-1.0-3/ beta-1.0-1/ delta-1.0-1/ " ]] \
+  && cmp -s "$REMOTE/edge/x86_64/omarchy.db" "$REMOTE/edge/x86_64/omarchy.db.tar.zst" \
+  && pass "a publish builds on the served database when the archive is behind" || fail "served database: $(served)"
+
+# The names pacman reads go up first. An upload that stops before the
+# archives leaves them behind what is served, never ahead of it, and the next
+# publish brings them back in step.
+archived() { bsdtar -tf "$REMOTE/edge/x86_64/omarchy.db.tar.zst" | grep '/$' | sort | tr '\n' ' '; }
+mkdir -p "$T/no-archive-upload"
+cat > "$T/no-archive-upload/rclone" <<'EOF_RCLONE'
+#!/bin/bash
+if [[ $1 == copy && " $* " == *"omarchy.db.tar.zst"* && " $* " == *" --filter "* ]]; then
+  echo 'simulated upload failure' >&2
+  exit 7
+fi
+exec "$REAL_RCLONE" "$@"
+EOF_RCLONE
+chmod +x "$T/no-archive-upload/rclone"
+F1=$(mkpkg phi 1 any)
+if PATH="$T/no-archive-upload:$PATH" pub "$F1"; then fail "a failed archive upload must fail the publish"; fi
+[[ "$(served)" == "alpha-1.0-3/ beta-1.0-1/ delta-1.0-1/ phi-1.0-1/ " && "$(archived)" == "alpha-1.0-3/ beta-1.0-1/ delta-1.0-1/ " ]] \
+  && pass "a stopped upload leaves the archive behind what is served, not ahead" || fail "served $(served), archive $(archived)"
+pub "$F1" && [[ "$(archived)" == "$(served)" ]] && grep -q 'already serves phi' "$T/out" \
+  && pass "the next run finds the package served" || fail "rerun after a stopped upload: $(cat "$T/out")"
+cp "$T/behind.db.tar.zst" "$REMOTE/edge/x86_64/omarchy.db.tar.zst"
+unpub nosuch && grep -q 'nothing to remove' "$T/out" && [[ "$(archived)" == "$(served)" ]] \
+  && pass "an unpublish with nothing to remove also brings the archive back in step" || fail "unpublish sync: $(archived)"

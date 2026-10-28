@@ -100,13 +100,14 @@ read_db() { # read_db <remote dir> <out.tsv>
   # A listing that failed is not a missing database: stop rather than plan as
   # if the destination were empty.
   listing=$(remote_listing "$dir") || exit 1
-  if ! grep -qx 'omarchy.db.tar.zst' <<<"$listing"; then
+  if ! grep -qx 'omarchy.db' <<<"$listing"; then
     : > "$out"
     return 1
   fi
   # read_db runs on the left of ||, where set -e does not apply: a database
   # that could not be pulled or read would plan as an empty channel.
-  rclone copyto "$dir/omarchy.db.tar.zst" "$db" --s3-no-head || exit 1
+  # What pacman is served, not the archive beside it (upload_database).
+  rclone copyto "$dir/omarchy.db" "$db" --s3-no-head || exit 1
   mkdir -p "$db.d"
   # Unpack it whole: with --include, bsdtar fails on a valid empty database.
   bsdtar -xf "$db" -C "$db.d" || { print_error "Cannot read the database at $dir"; exit 1; }
@@ -210,7 +211,11 @@ if [[ $DRY_RUN == true ]]; then
   print_success "Dry run: nothing published"
   exit 0
 fi
-(( promoted )) || { print_success "$TO/$ARCH is already up to date with $FROM"; exit 0; }
+if (( ! promoted )); then
+  sync_archives "$DEST" || exit 1
+  print_success "$TO/$ARCH is already up to date with $FROM"
+  exit 0
+fi
 
 # --- 3. copy, verify, publish in batches -------------------------------------
 # Batches break between pkgbases, never inside one.

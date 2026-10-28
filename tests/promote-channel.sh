@@ -153,9 +153,36 @@ if PATH="$T/unreadable-rc:$PATH" promote alpha; then fail "an unreadable destina
     && pass "an unreadable destination stops the promotion and leaves rc alone" || fail "unreadable destination: $(entries rc)"
 fi
 
+# The same for a destination database that lists but cannot be downloaded.
+mkdir -p "$T/undownloadable-rc"
+cat > "$T/undownloadable-rc/rclone" <<'EOF_RCLONE'
+#!/bin/bash
+if [[ $1 == copyto && $2 == */rc/*/omarchy.db.tar.zst ]]; then
+  echo 'simulated download failure' >&2
+  exit 7
+fi
+exec "$REAL_RCLONE" "$@"
+EOF_RCLONE
+chmod +x "$T/undownloadable-rc/rclone"
+: > "$T/record"
+if PATH="$T/undownloadable-rc:$PATH" promote alpha; then fail "a destination database that cannot be downloaded should stop the promotion"; else
+  [[ "$(entries rc)" == "$rc_before" ]] && ! grep -q '"action":"promote"' "$T/record" \
+    && pass "a destination database that cannot be downloaded stops the promotion" || fail "undownloadable destination: $(entries rc)"
+fi
+
 if "$BIN/promote-channel" --remote "$REMOTE" --from edge --to stable --arch x86_64 >"$T/out" 2>&1; then
   fail "edge -> stable should refuse"
 else grep -q 'refusing edge -> stable' "$T/out" && pass "channels only move one step forward" || fail "direction reason"; fi
+
+# A channel whose database is empty (repo-remove leaves one when the last
+# package goes) is readable; it simply holds nothing yet.
+mkdir -p "$REMOTE/stable/x86_64"
+bsdtar -cf - -T /dev/null | zstd -q > "$REMOTE/stable/x86_64/omarchy.db.tar.zst"
+: > "$T/record"
+"$BIN/promote-channel" --remote "$REMOTE" --from rc --to stable --arch x86_64 --record "$T/record" --dry-run >"$T/out" 2>&1 \
+  && [[ $(plan_action pinned) == promote ]] \
+  && pass "a destination with an empty database plans like an empty channel" || fail "empty destination database"
+rm "$REMOTE/stable/x86_64/omarchy.db.tar.zst"
 
 # rc -> stable: pinned packages move there (stable gets the release pair by
 # promotion); fast-ring ones are published at merge.

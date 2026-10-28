@@ -104,9 +104,12 @@ read_db() { # read_db <remote dir> <out.tsv>
     : > "$out"
     return 1
   fi
-  rclone copyto "$dir/omarchy.db.tar.zst" "$db" --s3-no-head
+  # read_db runs on the left of ||, where set -e does not apply: a database
+  # that could not be pulled or read would plan as an empty channel.
+  rclone copyto "$dir/omarchy.db.tar.zst" "$db" --s3-no-head || exit 1
   mkdir -p "$db.d"
-  bsdtar -xf "$db" -C "$db.d" --include '*/desc'
+  # Unpack it whole: with --include, bsdtar fails on a valid empty database.
+  bsdtar -xf "$db" -C "$db.d" || { print_error "Cannot read the database at $dir"; exit 1; }
   # One desc per entry; a new file starts a new record.
   find "$db.d" -name desc -print0 | xargs -0r awk '
     function flush() { if (name != "") print name "\t" ver "\t" base "\t" file "\t" sum "\t" size; name = ver = base = file = sum = size = "" }
@@ -117,7 +120,7 @@ read_db() { # read_db <remote dir> <out.tsv>
     /^%FILENAME%$/ { getline file }
     /^%SHA256SUM%$/ { getline sum }
     /^%CSIZE%$/ { getline size }
-    END { flush() }' | sort > "$out"
+    END { flush() }' | sort > "$out" || { print_error "Cannot read the database at $dir"; exit 1; }
 }
 read_db "$SRC" "$WORK/src.tsv" || { print_error "No database at $SRC"; exit 1; }
 read_db "$DEST" "$WORK/dest.tsv" || print_warning "No database at $DEST yet; everything eligible is new there"

@@ -175,6 +175,20 @@ else
   [[ $? == 2 ]] && grep -q 'lists mac-kernel twice' "$T/out" && pass "a malformed inventory is a usage error" || fail "duplicate inventory"
 fi
 cp "$T/inventory" "$T/root/release/mac-inventory.txt"
+echo "mac-ghost 1.0-1" >> "$T/root/release/mac-inventory.txt"
+: > "$T/record"
+if "$BIN/check-mac-set" --remote "$REMOTE" --channel rc --arch aarch64 --record "$T/record" \
+  --add $(mkpkg mac-kernel 3 aarch64 'mac-boot>=1.0') >"$T/out" 2>&1; then
+  fail "an inventory pkgbase no recipe builds should refuse"
+fi
+[[ $(mac_result) == refused ]] && says 'the inventory lists mac-ghost, but no recipe on this checkout builds that pkgbase' \
+  && pass "an inventory pkgbase no recipe builds is named, with a verdict recorded" || fail "missing recipe"
+cp "$T/inventory" "$T/root/release/mac-inventory.txt"
+if "$BIN/check-mac-set" --remote "$T/nowhere" --channel rc --arch aarch64 --add "$FAST2" >"$T/out" 2>&1; then
+  fail "an unreadable channel should not pass"
+else
+  [[ $? == 2 ]] && grep -q 'Cannot list' "$T/out" && pass "an unreadable channel fails closed instead of reading as empty" || fail "unreadable remote"
+fi
 
 # --- report only, for now -------------------------------------------------------
 # Promotions report the check and still publish until refusing is agreed.

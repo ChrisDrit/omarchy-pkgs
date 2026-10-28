@@ -92,7 +92,8 @@ unpack() { # unpack <db|dir|""> <dir>: a database's entries as <dir>/<name-versi
 }
 if [[ -n $REMOTE ]]; then
   dir="$REMOTE/${PREFIX:+$PREFIX/}$CHANNEL/$ARCH"
-  listing=$(rclone lsf "$dir/" --s3-no-head 2>/dev/null || true)
+  # An unreadable channel is not an empty one: it would hide the Mac set.
+  listing=$(rclone lsf "$dir/" --s3-no-head) || usage "Cannot list $dir"
   if grep -qx 'omarchy.db.tar.zst' <<<"$listing"; then
     rclone copyto "$dir/omarchy.db.tar.zst" "$WORK/before.db.tar.zst" --s3-no-head
     BEFORE=$WORK/before.db.tar.zst
@@ -248,6 +249,7 @@ recipe_for() { # recipe_for <pkgbase>: the recipe on this checkout that builds i
   while IFS= read -r dir; do
     [[ $(package_pkgbase "$dir" "$ARCH") == "$1" ]] && { echo "$dir"; return; }
   done < <(package_dirs)
+  return 0
 }
 
 if (( ${#moved_mac[@]} )); then

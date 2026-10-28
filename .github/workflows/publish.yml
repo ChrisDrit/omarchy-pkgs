@@ -365,25 +365,33 @@ jobs:
           record_slot() { jq -nc --arg m "$1" --arg a "$2" --arg st "$3" --arg files "$4" \
             '{mirror:$m, arch:$a, status:$st, packages:[$files | split(" ") | .[] | select(length>0) | sub(".*/";"") | sub("\\.pkg\\.tar\\.zst$";"")]}' >> slots.jsonl; }
           status=0
-          for mirror in edge rc stable; do
+          # rc and stable get fast-ring builds here, held to the qualified Mac
+          # set like any promotion (bin/check-mac-set). Every one of those
+          # slots is checked before any slot publishes, edge included, so a
+          # refusal on one architecture leaves every channel as it was.
+          : > mac-slots.txt
+          for mirror in rc stable; do
+            for parch in x86_64 aarch64; do
+              files=${slot_files["$mirror/$parch"]:-}
+              [[ -z "$files" ]] || echo "$mirror $parch $files" >> mac-slots.txt
+            done
+          done
+          if [[ -s mac-slots.txt ]] && ! docker run --rm \
+            -e OMARCHY_PUBLISH_PREFIX \
+            -e RCLONE_CONFIG_R2_TYPE -e RCLONE_CONFIG_R2_PROVIDER -e RCLONE_CONFIG_R2_ENDPOINT -e RCLONE_CONFIG_R2_NO_CHECK_BUCKET \
+            -e RCLONE_CONFIG_R2_ACCESS_KEY_ID -e RCLONE_CONFIG_R2_SECRET_ACCESS_KEY \
+            -v "$PWD:/w:ro" -w /w \
+            omarchy-pkg-builder:latest-x86_64-edge \
+            bin/check-mac-set --remote R2:omarchy-pkgs --slots mac-slots.txt; then
+            echo "::error title=Mac package set::this merge would leave rc or stable without the qualified Mac set; nothing published"
+            while read -r mirror parch files; do record_slot "$mirror" "$parch" refused "$files"; done < mac-slots.txt
+            status=1
+          fi
+          (( status == 0 )) && for mirror in edge rc stable; do
             for parch in x86_64 aarch64; do
               files=${slot_files["$mirror/$parch"]:-}
               [[ -n "$files" ]] || continue
               echo "==> $mirror/$parch: $files"
-              # rc and stable get fast-ring builds here, held to the
-              # qualified Mac set like any promotion (bin/check-mac-set).
-              if [[ $mirror != edge ]] && ! docker run --rm \
-                -e OMARCHY_PUBLISH_PREFIX \
-                -e RCLONE_CONFIG_R2_TYPE -e RCLONE_CONFIG_R2_PROVIDER -e RCLONE_CONFIG_R2_ENDPOINT -e RCLONE_CONFIG_R2_NO_CHECK_BUCKET \
-                -e RCLONE_CONFIG_R2_ACCESS_KEY_ID -e RCLONE_CONFIG_R2_SECRET_ACCESS_KEY \
-                -v "$PWD:/w:ro" -w /w \
-                omarchy-pkg-builder:latest-x86_64-edge \
-                bin/check-mac-set --remote R2:omarchy-pkgs --channel "$mirror" --arch "$parch" --add $files; then
-                echo "::error title=Mac package set::$mirror/$parch would not hold the qualified Mac set after this publish; refused"
-                record_slot "$mirror" "$parch" refused "$files"
-                status=1
-                break 2
-              fi
               if docker run --rm \
                 -e GPG_PRIVATE_KEY -e GPG_PASSPHRASE -e OMARCHY_PUBLISH_PREFIX \
                 -e RCLONE_CONFIG_R2_TYPE -e RCLONE_CONFIG_R2_PROVIDER -e RCLONE_CONFIG_R2_ENDPOINT -e RCLONE_CONFIG_R2_NO_CHECK_BUCKET \
@@ -460,6 +468,24 @@ jobs:
           chmod 0777 "$RUNNER_TEMP/fast-ring"
           chmod 0666 "$RUNNER_TEMP/fast-ring/record.jsonl"
           status=0
+          # Plan and check every slot (bin/check-mac-set, inside
+          # promote-channel) before any publishes: a refusal on one
+          # architecture leaves the other as it was.
+          for mirror in rc stable; do
+            for parch in x86_64 aarch64; do
+              list=${bases["$mirror $parch"]:-}
+              [[ -n $list ]] || continue
+              if ! docker run --rm \
+                -e OMARCHY_PUBLISH_PREFIX \
+                -e RCLONE_CONFIG_R2_TYPE -e RCLONE_CONFIG_R2_PROVIDER -e RCLONE_CONFIG_R2_ENDPOINT -e RCLONE_CONFIG_R2_NO_CHECK_BUCKET \
+                -e RCLONE_CONFIG_R2_ACCESS_KEY_ID -e RCLONE_CONFIG_R2_SECRET_ACCESS_KEY \
+                -v "$PWD:/w:ro" -w /w "$builder" \
+                bin/promote-channel --remote R2:omarchy-pkgs --fast-ring --from edge --to "$mirror" --arch "$parch" --dry-run $list; then
+                echo "::error title=Mac package set::the fast-ring catch-up into $mirror/$parch was refused; nothing published"
+                exit 1
+              fi
+            done
+          done
           for mirror in rc stable; do
             for parch in x86_64 aarch64; do
               list=${bases["$mirror $parch"]:-}

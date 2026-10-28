@@ -168,6 +168,23 @@ fi
 "$BIN/check-mac-set" --remote "$REMOTE" --channel rc --arch aarch64 --record "$T/record" --add $(mkpkg fast-tool 3 aarch64 +tool-api=1) >"$T/out" 2>&1 \
   && [[ $(mac_result) == pass ]] && pass "a fast-ring publish that keeps the closure resolving passes" || fail "fast-ring pass"
 
+# The merge publish checks every rc and stable slot before any publishes, as
+# publish.yml does: an aarch64 refusal leaves x86_64 as it was too.
+X86_ALPHA=$(mkpkg alpha 7 x86_64)
+printf 'rc x86_64 %s\nrc aarch64 %s\n' "$X86_ALPHA" "$FAST2" > "$T/slots"
+x86_before=$(entries rc x86_64) arm_before=$(entries rc aarch64)
+: > "$T/record"
+if "$BIN/check-mac-set" --remote "$REMOTE" --slots "$T/slots" --record "$T/record" >"$T/out" 2>&1; then
+  pub rc x86_64 "$X86_ALPHA"; pub rc aarch64 "$FAST2"
+  fail "a publish with one refused slot should refuse"
+fi
+[[ "$(jq -r 'select(.type=="mac-set") | .arch + ":" + .result' "$T/record" | tr '\n' ' ')" == "x86_64:untouched aarch64:refused " ]] \
+  && [[ "$(entries rc x86_64)" == "$x86_before" && "$(entries rc aarch64)" == "$arm_before" ]] \
+  && pass "a merge publish is checked slot by slot before anything publishes; one refusal publishes nothing" || fail "slots: $(cat "$T/record")"
+printf 'rc x86_64 %s\n' "$X86_ALPHA" > "$T/slots"
+"$BIN/check-mac-set" --remote "$REMOTE" --slots "$T/slots" >"$T/out" 2>&1 \
+  && pass "a merge publish whose slots all pass is cleared" || fail "slots pass"
+
 # --- a pkgbase renamed away from the Mac set ------------------------------------
 # mac-audio rebuilt under a pkgbase the inventory does not list is still a
 # Mac package: the old pkgbase classifies it.

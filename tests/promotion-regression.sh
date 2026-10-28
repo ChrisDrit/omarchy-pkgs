@@ -101,7 +101,8 @@ MAC_EDGE=$(mkpkg linux-aurora 2 aarch64; mkpkg omarchy-mac 2 aarch64 "" 'shared-
 # One line per step: the step, the exit code, then the plan, the publishes
 # and the destination's database entries, each normalised and sorted.
 run_side() { # run_side <before|after>
-  local side=$1 bin="$T/$side/bin" remote="$T/$side-r2" out="$T/$side.result"
+  local side=$1
+  local bin="$T/$side/bin" remote="$T/$side-r2" out="$T/$side.result"
   : > "$out"
   pub() { # pub <mirror> <arch> <files...>
     local mirror=$1 arch=$2; shift 2

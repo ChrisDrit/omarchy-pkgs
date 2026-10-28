@@ -166,6 +166,7 @@ fi
   && [[ $(mac_result) == pass ]] && pass "a fast-ring publish that keeps the closure resolving passes" || fail "fast-ring pass"
 
 # --- the inventory itself ------------------------------------------------------
+cp "$T/root/release/mac-inventory.txt" "$T/inventory"
 echo "mac-kernel 1.0-1" >> "$T/root/release/mac-inventory.txt"
 if "$BIN/check-mac-set" --channel rc --arch aarch64 --before "$REMOTE/rc/aarch64/omarchy.db.tar.zst" \
   --after "$REMOTE/rc/aarch64/omarchy.db.tar.zst" >"$T/out" 2>&1; then
@@ -173,6 +174,7 @@ if "$BIN/check-mac-set" --channel rc --arch aarch64 --before "$REMOTE/rc/aarch64
 else
   [[ $? == 2 ]] && grep -q 'lists mac-kernel twice' "$T/out" && pass "a malformed inventory is a usage error" || fail "duplicate inventory"
 fi
+cp "$T/inventory" "$T/root/release/mac-inventory.txt"
 
 # --- report only, for now -------------------------------------------------------
 # Promotions report the check and still publish until refusing is agreed.

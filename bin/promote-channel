@@ -36,8 +36,9 @@
 #
 # Before anything is published, bin/check-mac-set holds the destination as
 # the plan would leave it to the qualified Mac set (release/mac-inventory.txt)
-# and that set's shared dependency closure. A plan that moves no Mac package
-# and nothing the Mac set depends on is not affected.
+# and that set's shared dependency closure, and refuses the whole plan, dry
+# run included, when it does not hold. A plan that moves no Mac package and
+# nothing the Mac set depends on is not affected.
 #
 # --record appends one JSON object per line: {"type":"plan",...} for every
 # package considered, {"type":"mac-set",...} for the Mac package-set check,
@@ -220,13 +221,15 @@ mac_after_view() {
     cp -R "$WORK/src.db.tar.zst.d/$name-$ver" "$WORK/after/" || return 1
   done < "$WORK/promote-names.tsv"
 }
-# Report only for now: no outcome of the check, a failure included, stops
-# the promotion.
+# Fail closed: a plan the check cannot vouch for, because the view could not
+# be built or the check could not run, is refused like one it rejects.
 if ! mac_after_view; then
-  print_warning "Could not build $TO/$ARCH as this plan would leave it; the Mac package set was not checked"
+  print_error "Could not build $TO/$ARCH as this plan would leave it; refusing to promote $FROM/$ARCH into $TO/$ARCH: nothing published"
+  exit 1
 elif ! "$BUILD_ROOT/bin/check-mac-set" --channel "$TO" --arch "$ARCH" \
   --before "$WORK/dest.db.tar.zst.d" --after "$WORK/after" --record "$RECORD"; then
-  print_warning "The Mac package-set check would refuse this plan, or could not run; promotions only report it for now"
+  print_error "Refusing to promote $FROM/$ARCH into $TO/$ARCH: nothing published"
+  exit 1
 fi
 
 if [[ $DRY_RUN == true ]]; then

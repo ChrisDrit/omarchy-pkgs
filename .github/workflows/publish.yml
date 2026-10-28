@@ -379,7 +379,10 @@ jobs:
                 -v "$PWD:/w:ro" -w /w \
                 omarchy-pkg-builder:latest-x86_64-edge \
                 bin/check-mac-set --remote R2:omarchy-pkgs --channel "$mirror" --arch "$parch" --add $files; then
-                echo "::warning title=Mac package set::$mirror/$parch would not hold the qualified Mac set after this publish (reported, not enforced)"
+                echo "::error title=Mac package set::$mirror/$parch would not hold the qualified Mac set after this publish; refused"
+                record_slot "$mirror" "$parch" refused "$files"
+                status=1
+                break 2
               fi
               if docker run --rm \
                 -e GPG_PRIVATE_KEY -e GPG_PASSPHRASE -e OMARCHY_PUBLISH_PREFIX \

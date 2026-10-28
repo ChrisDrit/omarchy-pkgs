@@ -118,6 +118,49 @@ pub "$A1" "$A3" "$D1" && [[ "$(entries)" == "alpha-1.0-3/ beta-1.0-1/ delta-1.0-
 gpg --batch --quiet --import <<<"$GPG_PRIVATE_KEY" 2>/dev/null || true
 ( cd "$REMOTE/edge/x86_64" && for f in *.pkg.tar.zst; do gpg --batch --quiet --verify "$f.sig" "$f" 2>/dev/null || { echo "FAIL: signature $f"; exit 1; }; done ) && pass "all signatures verify"
 
+# No run uploads a database smaller than the one it pulled.
+files_entries() { tar -tf "$REMOTE/edge/x86_64/omarchy.files.tar.zst" | grep -c '/$'; }
+db_sums() { sha256sum < "$REMOTE/edge/x86_64/omarchy.db.tar.zst"; sha256sum < "$REMOTE/edge/x86_64/omarchy.files.tar.zst"; }
+E1=$(mkpkg epsilon 1 any)
+
+# The files database could not be downloaded: before, the failure was
+# ignored and repo-add built a files database holding only this batch.
+mkdir -p "$T/no-files-db"
+cat > "$T/no-files-db/rclone" <<'EOF_RCLONE'
+#!/bin/bash
+if [[ $1 == copy && $2 == */omarchy.files.tar.zst ]]; then
+  echo 'simulated download failure' >&2
+  exit 7
+fi
+exec "$REAL_RCLONE" "$@"
+EOF_RCLONE
+chmod +x "$T/no-files-db/rclone"
+sums_before=$(db_sums) files_count=$(files_entries)
+if PATH="$T/no-files-db:$PATH" pub "$E1"; then fail "a files database that could not be pulled must stop publication"; fi
+[[ "$(db_sums)" == "$sums_before" && "$(files_entries)" == "$files_count" ]] \
+  && pass "a files database that could not be pulled stops publication" || fail "files database replaced"
+
+# Whatever the cause, a database that shrank is never uploaded. This repo-add
+# loses the pulled databases first, as a run that started from nothing would.
+mkdir -p "$T/forgetful-repo-add"
+export REAL_REPO_ADD=$(command -v repo-add)
+cat > "$T/forgetful-repo-add/repo-add" <<'EOF_REPO_ADD'
+#!/bin/bash
+rm -f omarchy.db.tar.zst omarchy.files.tar.zst
+exec "$REAL_REPO_ADD" "$@"
+EOF_REPO_ADD
+chmod +x "$T/forgetful-repo-add/repo-add"
+if PATH="$T/forgetful-repo-add:$PATH" pub "$E1"; then fail "a database that shrank must not be uploaded"; fi
+grep -q 'refusing to upload it' "$T/out" && [[ "$(db_sums)" == "$sums_before" ]] \
+  && pass "a database that shrank is not uploaded" || fail "shrunken database uploaded"
+
+# A first publish that stopped after its packages but before its database is
+# retried like any other: the files already there are added to the new one.
+mkdir -p "$REMOTE/rc/x86_64" && cp "$E1" "$REMOTE/rc/x86_64/"
+"$ROOT/bin/publish-artifact" --remote "$REMOTE" --mirror rc --arch x86_64 "$E1" >"$T/out" 2>&1 \
+  && grep -q 'identical bytes' "$T/out" && [[ "$(tar -tf "$REMOTE/rc/x86_64/omarchy.db.tar.zst" | grep '/$')" == "epsilon-1.0-1/" ]] \
+  && pass "a first publish that stopped before its database can be retried" || fail "retry of a first publish"
+
 # unpublish-packages reads the channel the same way: a listing that failed
 # stops it, rather than reading as "nothing to remove" while the packages stay
 # served.
@@ -128,5 +171,9 @@ if PATH="$T/unreadable-remote:$PATH" unpub beta; then
 fi
 grep -q 'Cannot read remote repository' "$T/out" && [[ "$(sha256sum < "$REMOTE/edge/x86_64/omarchy.db.tar.zst")" == "$db_before" ]] \
   && pass "unpublish stops on an unreadable channel" || fail "unpublish on an unreadable channel"
+sums_before=$(db_sums)
+if PATH="$T/no-files-db:$PATH" unpub beta; then fail "unpublish must stop when the files database cannot be pulled"; fi
+[[ "$(db_sums)" == "$sums_before" ]] \
+  && pass "unpublish stops when the files database cannot be pulled" || fail "unpublish replaced the files database"
 unpub beta && [[ "$(entries)" == "alpha-1.0-3/ delta-1.0-1/ " ]] \
   && pass "unpublish removes the named package" || fail "unpublish"

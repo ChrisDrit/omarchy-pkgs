@@ -53,7 +53,12 @@ if ! grep -q '^omarchy.db.tar.zst$' <<<"$listing"; then
   exit 0
 fi
 rclone copy "$DEST/omarchy.db.tar.zst" "$WORK/repo" --s3-no-head
-rclone copy "$DEST/omarchy.files.tar.zst" "$WORK/repo" --s3-no-head 2>/dev/null || true
+# repo-remove rewrites the files database too, so one the channel serves but
+# this run could not pull would go back up without the rest of the channel.
+if grep -q '^omarchy.files.tar.zst$' <<<"$listing"; then
+  rclone copy "$DEST/omarchy.files.tar.zst" "$WORK/repo" --s3-no-head
+  [[ -s "$WORK/repo/omarchy.files.tar.zst" ]] || { print_error "Could not pull the files database from $DEST"; exit 1; }
+fi
 before=$(tar -tf "$WORK/repo/omarchy.db.tar.zst" | grep -c '/$')
 print_info "Pulled current database ($before entries)"
 

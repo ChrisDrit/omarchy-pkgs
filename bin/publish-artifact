@@ -66,10 +66,21 @@ mkdir -p "$WORK/repo"
 # leaves the remote state unknown; treating it as empty could replace a
 # complete database with one containing only this batch.
 listing=$(remote_listing "$DEST") || exit 1
+db_entries() { [[ -f $1 ]] || { echo 0; return; }; tar -tf "$1" | grep -c '/$' || true; }
+before=0 files_before=0
 if grep -q '^omarchy.db.tar.zst$' <<<"$listing"; then
   rclone copy "$DEST/omarchy.db.tar.zst" "$WORK/repo" --s3-no-head
-  rclone copy "$DEST/omarchy.files.tar.zst" "$WORK/repo" --s3-no-head 2>/dev/null || true
-  print_info "Pulled current database ($(tar -tf "$WORK/repo/omarchy.db.tar.zst" | grep -c '/$') entries)"
+  # repo-add rebuilds the files database from what it is given, so one the
+  # channel serves but this run could not pull would go back up holding only
+  # this batch.
+  if grep -q '^omarchy.files.tar.zst$' <<<"$listing"; then
+    rclone copy "$DEST/omarchy.files.tar.zst" "$WORK/repo" --s3-no-head
+    [[ -s "$WORK/repo/omarchy.files.tar.zst" ]] || { print_error "Could not pull the files database from $DEST"; exit 1; }
+  fi
+  [[ -s "$WORK/repo/omarchy.db.tar.zst" ]] || { print_error "Could not pull the database from $DEST"; exit 1; }
+  before=$(db_entries "$WORK/repo/omarchy.db.tar.zst")
+  files_before=$(db_entries "$WORK/repo/omarchy.files.tar.zst")
+  print_info "Pulled current database ($before entries)"
 else
   print_warning "No database at $DEST — creating a new one"
 fi
@@ -137,7 +148,15 @@ done
 ( cd "$WORK/repo" && repo-add --quiet omarchy.db.tar.zst "${FILES[@]/#*\//}" )
 ln -sf omarchy.db.tar.zst "$WORK/repo/omarchy.db"
 ln -sf omarchy.files.tar.zst "$WORK/repo/omarchy.files"
-print_info "Database now has $(tar -tf "$WORK/repo/omarchy.db.tar.zst" | grep -c '/$') entries"
+# repo-add only adds and replaces entries. A database that shrank started from
+# less than the channel serves, and uploading it would hide the difference.
+after=$(db_entries "$WORK/repo/omarchy.db.tar.zst")
+files_after=$(db_entries "$WORK/repo/omarchy.files.tar.zst")
+if (( after < before || files_after < files_before )); then
+  print_error "The new database has $after entries ($files_after in the files database) where $DEST had $before ($files_before); refusing to upload it"
+  exit 1
+fi
+print_info "Database now has $after entries"
 
 # --- 5. upload: packages, signatures, database last -----------------------
 rclone copy "$WORK/repo" "$DEST" --s3-no-head --ignore-existing --filter '- *.sig' --filter '+ *.pkg.tar.*' --filter '- *'

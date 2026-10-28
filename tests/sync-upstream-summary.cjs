@@ -266,6 +266,11 @@ for (const [name, options, expected, previous = 'failing'] of [
     pr(rerun(run('self-tests', 'SUCCESS')).map((check, i) => i === 2 ? run('self-tests', 'FAILURE', '2026-10-28T00:22:06Z') : check)), '1397'],
   ['a build re-run that was cancelled is refreshed, whatever the earlier run did', pr(rerun(run('result', 'CANCELLED'))), ''],
   ['a queued re-run of the build counts as running', pr(rerun(queued('result'))), '1397'],
+  ['a build job that timed out under a failed result is refreshed',
+    pr(withCheck('build (iptsd, aarch64, edge, aarch64)', 'TIMED_OUT')), ''],
+  ['a timed-out build that a re-run then failed for real is not pushed again',
+    pr(rerun(run('build (iptsd, aarch64, edge, aarch64)', 'FAILURE'), run('result', 'FAILURE'))
+      .map((check, i) => i === 0 ? run(check.name, 'TIMED_OUT') : check)), '1397'],
   ['a PR with no checks at all is refreshed', pr(null), '', ''],
   ['a failed commit status beside a passing build is recorded as a failure',
     { prs: [{ number: 1397, isCrossRepository: false, statusCheckRollup: buildFailed.map(check =>

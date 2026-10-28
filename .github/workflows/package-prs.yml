@@ -97,9 +97,10 @@ jobs:
       # bad metadata on master failed every PR's self-tests on 2026-10-21
       # until a fix in that package's directory, and a mirror timeout
       # passes on the next try. The build is reused unless it failed too.
-      # So is a PR missing one of the three required checks, or with one
-      # that was cancelled or timed out: a push is the only thing that
-      # starts them again.
+      # So is a PR missing one of the three required checks, or with any
+      # check that was cancelled or timed out: a push is the only thing that
+      # starts them again. A build job past its timeout-minutes still leaves
+      # `result` failed, so the jobs are read, not only `result`.
       #
       # A PR left behind master still merges, because master does not require
       # branches to be up to date. This only saves work, so any error here
@@ -114,8 +115,9 @@ jobs:
           PACKAGES: ${{ matrix.group.packages }}
         run: |
           # Prints the PR number, how many of its checks failed, and whether
-          # its required checks leave nothing a push would change: the build
-          # ran or is running, and the whole-tree checks passed or are running.
+          # its checks leave nothing a push would change: the build ran or is
+          # running, the whole-tree checks passed or are running, and no check
+          # was cut short.
           # A check re-run appears once per run; the newest one counts, and a
           # queued run (zero startedAt, empty conclusion) is the newest.
           read -r number failed settled < <(gh pr list -R "$GITHUB_REPOSITORY" \
@@ -132,7 +134,9 @@ jobs:
                       . == "CANCELLED" or . == "STARTUP_FAILURE")] as $failed
               | ($checks.result | . == "FAILURE" or . == "SUCCESS" or . == "RUNNING") as $built
               | ([$checks["self-tests", "build-isolation"] | . == "SUCCESS" or . == "RUNNING"] | all) as $tested
-              | "\(.number) \($failed | length) \($built and $tested)"') || true
+              | ([$checks[] | select(. == "TIMED_OUT" or . == "CANCELLED" or . == "STARTUP_FAILURE")]
+                  | length == 0) as $completed
+              | "\(.number) \($failed | length) \($built and $tested and $completed)"') || true
           [[ -n $number ]] || exit 0
           if (( failed )); then
             echo "previous=failing" >> "$GITHUB_OUTPUT"

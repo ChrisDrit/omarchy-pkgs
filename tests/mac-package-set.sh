@@ -196,3 +196,24 @@ promote edge rc aarch64 mac-kernel || fail "a reported mismatch should not stop 
 [[ $(mac_result) == refused && "$(entries rc aarch64)" == *"mac-kernel-1.0-2 "* ]] \
   && grep -q 'promotions only report it for now' "$T/out" \
   && pass "a promotion the check would refuse is reported and still published" || fail "report only: $(entries rc aarch64)"
+
+# Nor does a failure of the check itself: building the view the plan would
+# leave, or running check-mac-set.
+pub edge aarch64 $(mkpkg alpha 5 aarch64)
+db="$REMOTE/edge/aarch64/omarchy.db.tar.zst"
+cp "$db" "$T/edge.db"
+mkdir "$T/edge.d" && bsdtar -xf "$db" -C "$T/edge.d"
+mv "$T/edge.d/alpha-1.0-5" "$T/edge.d/alpha-entry"
+(cd "$T/edge.d" && bsdtar --zstd -cf "$db" *)
+promote edge rc aarch64 alpha || fail "a failure building the Mac view should not stop a report-only promotion"
+grep -q 'the Mac package set was not checked' "$T/out" && [[ "$(entries rc aarch64)" == *"alpha-1.0-5 "* ]] \
+  && pass "a failure building the view the plan would leave is a warning, and the promotion still publishes" || fail "view failure: $(entries rc aarch64)"
+cp "$T/edge.db" "$db"
+
+cp "$BIN/check-mac-set" "$T/check-mac-set"
+printf '#!/bin/bash\nexit 7\n' > "$BIN/check-mac-set"
+pub edge aarch64 $(mkpkg alpha 6 aarch64)
+promote edge rc aarch64 alpha || fail "a crashing check should not stop a report-only promotion"
+grep -q 'or could not run' "$T/out" && [[ "$(entries rc aarch64)" == *"alpha-1.0-6 "* ]] \
+  && pass "a check that cannot run is a warning, and the promotion still publishes" || fail "check crash: $(entries rc aarch64)"
+cp "$T/check-mac-set" "$BIN/check-mac-set"

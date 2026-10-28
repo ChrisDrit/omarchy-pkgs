@@ -211,15 +211,22 @@ print_info "Plan for $ARCH: $promoted to promote, $held held back, $current alre
 # --- 2b. the Mac package set ------------------------------------------------
 # The destination as this plan would leave it, against the qualified Mac set
 # (bin/check-mac-set), inside the publish lock the plan was made in.
-mkdir -p "$WORK/dest.db.tar.zst.d" "$WORK/after"
-cp -R "$WORK/dest.db.tar.zst.d/." "$WORK/after/"
-while IFS=$'\t' read -r name ver; do
-  [[ -n ${DEST_VER[$name]:-} ]] && rm -rf "$WORK/after/$name-${DEST_VER[$name]}"
-  cp -R "$WORK/src.db.tar.zst.d/$name-$ver" "$WORK/after/"
-done < "$WORK/promote-names.tsv"
-if ! "$BUILD_ROOT/bin/check-mac-set" --channel "$TO" --arch "$ARCH" \
+# Every step checks its own status: inside an `if` condition set -e is off.
+mac_after_view() {
+  mkdir -p "$WORK/dest.db.tar.zst.d" "$WORK/after" || return 1
+  cp -R "$WORK/dest.db.tar.zst.d/." "$WORK/after/" || return 1
+  while IFS=$'\t' read -r name ver; do
+    if [[ -n ${DEST_VER[$name]:-} ]]; then rm -rf "$WORK/after/$name-${DEST_VER[$name]}" || return 1; fi
+    cp -R "$WORK/src.db.tar.zst.d/$name-$ver" "$WORK/after/" || return 1
+  done < "$WORK/promote-names.tsv"
+}
+# Report only for now: no outcome of the check, a failure included, stops
+# the promotion.
+if ! mac_after_view; then
+  print_warning "Could not build $TO/$ARCH as this plan would leave it; the Mac package set was not checked"
+elif ! "$BUILD_ROOT/bin/check-mac-set" --channel "$TO" --arch "$ARCH" \
   --before "$WORK/dest.db.tar.zst.d" --after "$WORK/after" --record "$RECORD"; then
-  print_warning "The Mac package-set check would refuse this plan; promotions only report it for now"
+  print_warning "The Mac package-set check would refuse this plan, or could not run; promotions only report it for now"
 fi
 
 if [[ $DRY_RUN == true ]]; then

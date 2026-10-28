@@ -32,6 +32,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # tests/promotion-regression.sh compares promotions against the tooling
+      # of master before the Mac package-set check.
+      - name: Fetch the promotion baseline
+        run: git fetch --no-tags --depth=1 origin be8ab9bda3e53b163153944395f1912ac6d7f44f
+
       - name: Test PR workflow approval
         run: node --test tests/pr-workflow-approval.cjs
 
@@ -87,6 +92,7 @@ jobs:
               ./tests/publish-artifact.sh
               ./tests/promote-channel.sh
               ./tests/mac-package-set.sh
+              BASELINE_REF=be8ab9bda3e53b163153944395f1912ac6d7f44f ./tests/promotion-regression.sh
               shopt -s nullglob
               for test in pkgbuilds/*/test.sh; do
                 bash "$test"

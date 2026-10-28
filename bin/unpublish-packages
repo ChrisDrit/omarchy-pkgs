@@ -21,6 +21,7 @@ set -euo pipefail
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 source "$BUILD_ROOT/helpers/message-helpers.sh"
 source "$BUILD_ROOT/helpers/paths.sh"
+source "$BUILD_ROOT/helpers/remote-helpers.sh"
 
 REMOTE=${REMOTE:-pkgs.omarchy.org:omarchy-pkgs}
 PREFIX=${OMARCHY_PUBLISH_PREFIX:-}
@@ -44,7 +45,9 @@ print_header "Unpublish from $DEST"
 
 # --- 1. pull the current database -----------------------------------------
 mkdir -p "$WORK/repo"
-listing=$(rclone lsf "$DEST/" --s3-no-head 2>/dev/null || true)
+# A listing that failed is not an empty channel: stop rather than report that
+# there is nothing to remove while the packages stay served.
+listing=$(remote_listing "$DEST") || exit 1
 if ! grep -q '^omarchy.db.tar.zst$' <<<"$listing"; then
   print_info "No database at $DEST; nothing to remove"
   exit 0

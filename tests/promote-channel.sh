@@ -130,6 +130,29 @@ if promote big; then fail "a corrupt source file should refuse"; else
 fi
 cp "$T/good" "$f"
 
+# A destination that cannot be listed stops the run. It never reads as an
+# empty channel that every package has to reach. Only the first listing of rc
+# fails, as a transient error would, so the plan itself has to refuse.
+mkdir -p "$T/unreadable-rc"
+export REAL_RCLONE=$(command -v rclone) LISTING_FAILED="$T/listing-failed"
+cat > "$T/unreadable-rc/rclone" <<'EOF_RCLONE'
+#!/bin/bash
+if [[ $1 == lsf && $2 == */rc/* && ! -e $LISTING_FAILED ]]; then
+  touch "$LISTING_FAILED"
+  echo 'simulated remote listing failure' >&2
+  exit 7
+fi
+exec "$REAL_RCLONE" "$@"
+EOF_RCLONE
+chmod +x "$T/unreadable-rc/rclone"
+pub edge $(mkpkg alpha 5)
+rc_before=$(entries rc)
+: > "$T/record"
+if PATH="$T/unreadable-rc:$PATH" promote alpha; then fail "an unreadable destination should stop the promotion"; else
+  grep -q 'Cannot read remote repository' "$T/out" && [[ "$(entries rc)" == "$rc_before" ]] \
+    && pass "an unreadable destination stops the promotion and leaves rc alone" || fail "unreadable destination: $(entries rc)"
+fi
+
 if "$BIN/promote-channel" --remote "$REMOTE" --from edge --to stable --arch x86_64 >"$T/out" 2>&1; then
   fail "edge -> stable should refuse"
 else grep -q 'refusing edge -> stable' "$T/out" && pass "channels only move one step forward" || fail "direction reason"; fi

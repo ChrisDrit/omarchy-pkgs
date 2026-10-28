@@ -26,6 +26,7 @@ set -euo pipefail
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 source "$BUILD_ROOT/helpers/message-helpers.sh"
 source "$BUILD_ROOT/helpers/paths.sh"
+source "$BUILD_ROOT/helpers/remote-helpers.sh"
 
 REMOTE=${REMOTE:-pkgs.omarchy.org:omarchy-pkgs}
 PREFIX=${OMARCHY_PUBLISH_PREFIX:-}
@@ -61,21 +62,10 @@ done
 
 # --- 1. pull the current database -----------------------------------------
 mkdir -p "$WORK/repo"
-# A missing channel is a valid first publish (rclone exit 3). Every other
-# listing failure leaves the remote state unknown; treating it as empty could
-# replace a complete database with one containing only this batch.
-if listing=$(rclone lsf "$DEST/" --s3-no-head 2>"$WORK/listing-error"); then
-  :
-else
-  status=$?
-  if [[ $status -eq 3 ]]; then
-    listing=""
-  else
-    print_error "Cannot read remote repository at $DEST (rclone exit $status)"
-    cat "$WORK/listing-error" >&2
-    exit 1
-  fi
-fi
+# A missing channel is a valid first publish. Every other listing failure
+# leaves the remote state unknown; treating it as empty could replace a
+# complete database with one containing only this batch.
+listing=$(remote_listing "$DEST") || exit 1
 if grep -q '^omarchy.db.tar.zst$' <<<"$listing"; then
   rclone copy "$DEST/omarchy.db.tar.zst" "$WORK/repo" --s3-no-head
   rclone copy "$DEST/omarchy.files.tar.zst" "$WORK/repo" --s3-no-head 2>/dev/null || true

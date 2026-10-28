@@ -1,5 +1,6 @@
 #!/bin/bash
-# Self-test for bin/publish-artifact against a local directory as the remote.
+# Self-test for bin/publish-artifact, and its counterpart bin/unpublish-packages,
+# against a local directory as the remote.
 # Needs repo-add, gpg, rclone, bsdtar (run in the Arch builder/test container).
 set -euo pipefail
 ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
@@ -116,3 +117,16 @@ pub "$A1" "$A3" "$D1" && [[ "$(entries)" == "alpha-1.0-3/ beta-1.0-1/ delta-1.0-
 # db must verify: pacman can read it and each package's signature checks
 gpg --batch --quiet --import <<<"$GPG_PRIVATE_KEY" 2>/dev/null || true
 ( cd "$REMOTE/edge/x86_64" && for f in *.pkg.tar.zst; do gpg --batch --quiet --verify "$f.sig" "$f" 2>/dev/null || { echo "FAIL: signature $f"; exit 1; }; done ) && pass "all signatures verify"
+
+# unpublish-packages reads the channel the same way: a listing that failed
+# stops it, rather than reading as "nothing to remove" while the packages stay
+# served.
+unpub() { "$ROOT/bin/unpublish-packages" --remote "$REMOTE" --mirror edge --arch x86_64 "$@" >"$T/out" 2>&1; }
+db_before=$(sha256sum < "$REMOTE/edge/x86_64/omarchy.db.tar.zst")
+if PATH="$T/unreadable-remote:$PATH" unpub beta; then
+  fail "unpublishing from an unreadable channel must fail"
+fi
+grep -q 'Cannot read remote repository' "$T/out" && [[ "$(sha256sum < "$REMOTE/edge/x86_64/omarchy.db.tar.zst")" == "$db_before" ]] \
+  && pass "unpublish stops on an unreadable channel" || fail "unpublish on an unreadable channel"
+unpub beta && [[ "$(entries)" == "alpha-1.0-3/ delta-1.0-1/ " ]] \
+  && pass "unpublish removes the named package" || fail "unpublish"

@@ -44,6 +44,7 @@ set -euo pipefail
 BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 source "$BUILD_ROOT/helpers/message-helpers.sh"
 source "$BUILD_ROOT/helpers/paths.sh"
+source "$BUILD_ROOT/helpers/remote-helpers.sh"
 source "$BUILD_ROOT/helpers/package-metadata.sh"
 
 REMOTE=${REMOTE:-pkgs.omarchy.org:omarchy-pkgs}
@@ -96,7 +97,9 @@ read_db() { # read_db <remote dir> <out.tsv>
   local dir="$1" out="$2" db="$WORK/$(basename "$2" .tsv).db.tar.zst" listing
   # List first, then match: under pipefail, grep -q leaving early would
   # SIGPIPE a remote listing still streaming in and read as "no database".
-  listing=$(rclone lsf "$dir/" --s3-no-head 2>/dev/null || true)
+  # A listing that failed is not a missing database: stop rather than plan as
+  # if the destination were empty.
+  listing=$(remote_listing "$dir") || exit 1
   if ! grep -qx 'omarchy.db.tar.zst' <<<"$listing"; then
     : > "$out"
     return 1

@@ -370,6 +370,17 @@ jobs:
               files=${slot_files["$mirror/$parch"]:-}
               [[ -n "$files" ]] || continue
               echo "==> $mirror/$parch: $files"
+              # rc and stable get fast-ring builds here, held to the
+              # qualified Mac set like any promotion (bin/check-mac-set).
+              if [[ $mirror != edge ]] && ! docker run --rm \
+                -e OMARCHY_PUBLISH_PREFIX \
+                -e RCLONE_CONFIG_R2_TYPE -e RCLONE_CONFIG_R2_PROVIDER -e RCLONE_CONFIG_R2_ENDPOINT -e RCLONE_CONFIG_R2_NO_CHECK_BUCKET \
+                -e RCLONE_CONFIG_R2_ACCESS_KEY_ID -e RCLONE_CONFIG_R2_SECRET_ACCESS_KEY \
+                -v "$PWD:/w:ro" -w /w \
+                omarchy-pkg-builder:latest-x86_64-edge \
+                bin/check-mac-set --remote R2:omarchy-pkgs --channel "$mirror" --arch "$parch" --add $files; then
+                echo "::warning title=Mac package set::$mirror/$parch would not hold the qualified Mac set after this publish (reported, not enforced)"
+              fi
               if docker run --rm \
                 -e GPG_PRIVATE_KEY -e GPG_PASSPHRASE -e OMARCHY_PUBLISH_PREFIX \
                 -e RCLONE_CONFIG_R2_TYPE -e RCLONE_CONFIG_R2_PROVIDER -e RCLONE_CONFIG_R2_ENDPOINT -e RCLONE_CONFIG_R2_NO_CHECK_BUCKET \

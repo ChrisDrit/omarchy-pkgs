@@ -1,0 +1,29 @@
+# The qualified Mac package set: every Mac pkgbase, one per line, with the
+# exact version ([epoch:]pkgver-pkgrel, as the channel database lists it)
+# that may reach rc and stable, or `none` for a Mac pkgbase with no
+# qualified version yet. The owner sets it when picking a Mac candidate.
+#
+# bin/check-mac-set holds every promotion and fast-ring publication into rc
+# or stable to it: one that moves a Mac package must leave the channel's
+# whole Mac set at these versions, and one that moves anything the Mac set
+# depends on must leave that dependency closure resolving. Both
+# architectures follow the same list; an arch=any package is checked on
+# each architecture it is published for.
+#
+# A new Mac recipe belongs here before its first promotion, as `none` until
+# it is qualified: a pkgbase this file does not list is not checked.
+alsa-ucm-conf-aurora 10.aurora2-1
+aura 0.1.0.r20261014-2
+aurora-audio 4.1.aurora3-1
+aurora-bless 0.4.4.aurora2-1
+brcmfmac-awdl-dkms none
+linux-aurora 7.2.10.aurora1-2
+m1n1-aurora 1.6.1.aurora1-3
+mesa-aurora 1:26.3.0_devel.20261017.af3d9c6fc84-2
+omarchy-aurora-firmware 20261014-7
+omarchy-mac 0.1.4-1
+omarchy-mac-boot 20261020-2
+omarchy-mac-ml 1-1
+speakerguardd 0.1.0.aurora3-1
+uboot-asahi 2026.07.asahi2-4
+uboot-aurora 2026.07.aurora2-1

@@ -86,6 +86,7 @@ jobs:
               pacman -S --noconfirm --quiet rclone >/dev/null
               ./tests/publish-artifact.sh
               ./tests/promote-channel.sh
+              ./tests/mac-package-set.sh
               shopt -s nullglob
               for test in pkgbuilds/*/test.sh; do
                 bash "$test"

@@ -12,8 +12,9 @@
 # to), or as the package files a publish adds to the channel's current
 # database (--add; --remote pulls that database, as publish-artifact does).
 #
-# The Mac set is every pkgbase release/mac-inventory.txt lists. The write
-# touches it when it moves a Mac package, or a package in the Mac set's
+# The Mac set is every pkgbase release/mac-inventory.txt lists; a package is
+# a Mac package when its pkgbase before or after the write is one. The write
+# touches the set when it moves a Mac package, or a package in the Mac set's
 # shared dependency closure: what the Mac packages depend on, by name or
 # provides, that this channel serves, and what that depends on in turn. A
 # write that touches neither passes without further checks.
@@ -212,15 +213,19 @@ base_of() { if [[ $1 == A ]]; then echo "${A_BASE[$2]}"; else echo "${B_BASE[$2]
 declare -A IN_CLOSURE=()
 while read -r name; do [[ -n $name ]] && IN_CLOSURE[$name]=1; done < <(closure A; closure B)
 
+# A package is a Mac package when its pkgbase before or after the write is
+# one: a rebuild under a new pkgbase must not carry it out of the Mac set.
 moved_mac=() touched=false
+declare -A LEFT_MAC=()
 for name in "${!MOVED[@]}"; do
-  base=${A_BASE[$name]}
-  if [[ -n ${WANT[$base]:-} ]]; then
-    [[ " ${moved_mac[*]} " == *" $base "* ]] || moved_mac+=("$base")
+  base=${A_BASE[$name]} old=${B_BASE[$name]:-}
+  for b in "$base" "$old"; do
+    [[ -n $b && -n ${WANT[$b]:-} ]] || continue
+    [[ " ${moved_mac[*]} " == *" $b "* ]] || moved_mac+=("$b")
     touched=true
-  elif [[ -n ${IN_CLOSURE[$name]:-} ]]; then
-    touched=true
-  fi
+  done
+  [[ -n ${IN_CLOSURE[$name]:-} ]] && touched=true
+  [[ -n $old && -n ${WANT[$old]:-} && -z ${WANT[$base]:-} ]] && LEFT_MAC[$name]="$old $base"
 done
 mapfile -t moved_mac < <(printf '%s\n' "${moved_mac[@]}" | sed '/^$/d' | sort)
 
@@ -253,6 +258,10 @@ recipe_for() { # recipe_for <pkgbase>: the recipe on this checkout that builds i
 }
 
 if (( ${#moved_mac[@]} )); then
+  for name in "${!LEFT_MAC[@]}"; do
+    read -r old base <<<"${LEFT_MAC[$name]}"
+    problem "$name" "$name would move from Mac pkgbase $old to $base, which the inventory does not list"
+  done
   declare -A SEEN_BASE=()
   while IFS='|' read -r name ver base _; do
     [[ -n ${WANT[$base]:-} ]] || continue

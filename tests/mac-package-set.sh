@@ -41,16 +41,19 @@ mac-audio 1.0-1
 mac-new none
 EOF
 
-# minimal real packages via makepkg; +name is a provides, anything else a depends
-mkpkg() { # mkpkg <name> <pkgrel> <arch> [dep|+provide...]
-  local name=$1 rel=$2 arch=$3 d="$T/src/$1-$2-$3" item deps="" provs=""
+# minimal real packages via makepkg; +name is a provides, anything else a
+# depends; <name>@<pkgbase> builds it under another pkgbase
+mkpkg() { # mkpkg <name>[@pkgbase] <pkgrel> <arch> [dep|+provide...]
+  local name=${1%@*} base="" rel=$2 arch=$3 d="$T/src/$1-$2-$3" item deps="" provs=""
+  [[ $1 == *@* ]] && base=${1#*@}
   shift 3
   for item in "$@"; do
     if [[ $item == +* ]]; then provs+=" '${item#+}'"; else deps+=" '$item'"; fi
   done
   mkdir -p "$d"; cd "$d"
+  { [[ -z $base ]] || printf 'pkgbase=%s\n' "$base"
   printf 'pkgname=%s\npkgver=1.0\npkgrel=%s\narch=(%s)\ndepends=(%s)\nprovides=(%s)\npackage(){ install -Dm644 /dev/null "$pkgdir/usr/share/%s-%s"; }\n' \
-    "$name" "$rel" "$arch" "$deps" "$provs" "$name" "$rel" > PKGBUILD
+    "$name" "$rel" "$arch" "$deps" "$provs" "$name" "$rel"; } > PKGBUILD
   local carch=$arch; [[ $carch == any ]] && carch=x86_64
   if (( EUID == 0 )); then
     id -u fixture >/dev/null 2>&1 || useradd -m fixture
@@ -164,6 +167,19 @@ fi
 : > "$T/record"
 "$BIN/check-mac-set" --remote "$REMOTE" --channel rc --arch aarch64 --record "$T/record" --add $(mkpkg fast-tool 3 aarch64 +tool-api=1) >"$T/out" 2>&1 \
   && [[ $(mac_result) == pass ]] && pass "a fast-ring publish that keeps the closure resolving passes" || fail "fast-ring pass"
+
+# --- a pkgbase renamed away from the Mac set ------------------------------------
+# mac-audio rebuilt under a pkgbase the inventory does not list is still a
+# Mac package: the old pkgbase classifies it.
+: > "$T/record"
+if "$BIN/check-mac-set" --remote "$REMOTE" --channel rc --arch aarch64 --record "$T/record" \
+  --add $(mkpkg mac-audio@audio-renamed 2 aarch64) >"$T/out" 2>&1; then
+  fail "a Mac package moving to an unlisted pkgbase should refuse"
+fi
+[[ $(mac_result) == refused && "$(names)" == "mac-audio " ]] \
+  && says 'mac-audio would move from Mac pkgbase mac-audio to audio-renamed' \
+  && jq -e 'select(.type=="mac-set") | .moved == ["mac-audio"]' "$T/record" >/dev/null \
+  && pass "a Mac package rebuilt under an unlisted pkgbase is still checked, and refused" || fail "renamed pkgbase: $(cat "$T/record")"
 
 # --- the inventory itself ------------------------------------------------------
 cp "$T/root/release/mac-inventory.txt" "$T/inventory"

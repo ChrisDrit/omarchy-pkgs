@@ -21,3 +21,16 @@ remote_listing() {
     ;;
   esac
 }
+
+# db_entries <file>: how many packages a pulled database holds, 0 when there
+# is no file. repo-remove leaves a valid empty database when a channel's last
+# package goes, and grep -c exits 1 on it. A database that cannot be read
+# still fails, and so does a zero-byte one: bsdtar lists it as empty, but even
+# an empty database is a compressed archive with a header.
+db_entries() {
+  local list
+  [[ -f $1 ]] || { echo 0; return; }
+  [[ -s $1 ]] || { print_error "The database $1 is zero bytes" >&2; return 1; }
+  list=$(bsdtar -tf "$1") || { print_error "Cannot read the database $1" >&2; return 1; }
+  grep -c '/$' <<<"$list" || true
+}

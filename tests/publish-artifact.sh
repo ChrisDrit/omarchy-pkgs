@@ -177,3 +177,20 @@ if PATH="$T/no-files-db:$PATH" unpub beta; then fail "unpublish must stop when t
   && pass "unpublish stops when the files database cannot be pulled" || fail "unpublish replaced the files database"
 unpub beta && [[ "$(entries)" == "alpha-1.0-3/ delta-1.0-1/ " ]] \
   && pass "unpublish removes the named package" || fail "unpublish"
+
+# A channel whose last packages go keeps an empty database, as repo-remove
+# leaves it, and stays usable: removing what it no longer holds is a no-op,
+# and a publish fills it again.
+db_count() { bsdtar -tf "$REMOTE/edge/x86_64/omarchy.$1.tar.zst" | grep -c '/$' || true; }
+unpub alpha delta && [[ "$(db_count db)" == 0 && "$(db_count files)" == 0 ]] \
+  && pass "unpublishing a channel's last packages leaves an empty database" || fail "unpublish the last packages"
+unpub alpha && grep -q 'nothing to remove' "$T/out" \
+  && pass "unpublishing from an empty database removes nothing" || fail "unpublish from an empty database"
+# A truncated, zero-byte database is not an empty one.
+cp "$REMOTE/edge/x86_64/omarchy.db.tar.zst" "$T/empty.db.tar.zst"
+: > "$REMOTE/edge/x86_64/omarchy.db.tar.zst"
+if unpub alpha; then fail "a zero-byte database must not read as empty"; fi
+grep -q 'zero bytes' "$T/out" && pass "a zero-byte database is refused, not read as empty" || fail "zero-byte database"
+cp "$T/empty.db.tar.zst" "$REMOTE/edge/x86_64/omarchy.db.tar.zst"
+pub "$B1" && [[ "$(entries)" == "beta-1.0-1/ " && "$(db_count files)" == 1 ]] \
+  && pass "a package publishes into an empty database" || fail "publish into an empty database"

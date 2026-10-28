@@ -66,7 +66,6 @@ mkdir -p "$WORK/repo"
 # leaves the remote state unknown; treating it as empty could replace a
 # complete database with one containing only this batch.
 listing=$(remote_listing "$DEST") || exit 1
-db_entries() { [[ -f $1 ]] || { echo 0; return; }; tar -tf "$1" | grep -c '/$' || true; }
 before=0 files_before=0
 if grep -q '^omarchy.db.tar.zst$' <<<"$listing"; then
   rclone copy "$DEST/omarchy.db.tar.zst" "$WORK/repo" --s3-no-head
@@ -90,9 +89,13 @@ fi
 # re-run of a slot that already landed, an RC carried into an edge that is
 # ahead of it.
 if [[ -f "$WORK/repo/omarchy.db.tar.zst" ]]; then
-  served=$(tar -xO --zstd -f "$WORK/repo/omarchy.db.tar.zst" --wildcards '*/desc' 2>/dev/null | awk '
-    $0 == "%NAME%"    { getline; name = $0; next }
-    $0 == "%VERSION%" { getline; print name, $0 }')
+  # An empty database serves nothing, and tar finds no */desc in it to read.
+  served=""
+  if (( before )); then
+    served=$(tar -xO --zstd -f "$WORK/repo/omarchy.db.tar.zst" --wildcards '*/desc' 2>/dev/null | awk '
+      $0 == "%NAME%"    { getline; name = $0; next }
+      $0 == "%VERSION%" { getline; print name, $0 }')
+  fi
   keep=()
   for f in "${FILES[@]}"; do
     name=$(bsdtar -xOf "$f" .PKGINFO | awk -F' = ' '$1=="pkgname"{print $2}')

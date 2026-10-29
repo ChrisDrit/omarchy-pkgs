@@ -1,7 +1,7 @@
 # Maintainer: Wesley Grimes <wesgrimes@hey.com>
 
 pkgname=wayshare
-pkgver=0.2.4
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='macOS Screen Sharing server for Hyprland'
 arch=('x86_64' 'aarch64')
@@ -22,7 +22,7 @@ optdepends=('libva: HEVC encoding through VA-API'
             'libfdk-aac: High Performance audio'
             'libpulse: High Performance audio capture')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('081fa5d24182eeba0f060bb992300f8dbd0063f2aac40285d527b08054330279')
+sha256sums=('b3837876cf40e45fcc129c185dd224d80b0b43af1db3ed3078b424cbbb5416e3')
 
 prepare() {
   cd "$pkgname-$pkgver"

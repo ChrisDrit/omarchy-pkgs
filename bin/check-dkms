@@ -251,20 +251,20 @@ judge() {
 # does not build itself. Set by plan_for; empty when none were needed.
 ARCH_SOURCED=""
 
-# Where a channel's machines get Arch packages, x86_64 per channel
-# (default/pacman/mirrorlist-* in omacom/omarchy), aarch64 one mirror for all.
+# Where a channel's machines get Arch packages: each channel has its own
+# snapshot on both architectures (default/pacman/mirrorlist-* in
+# omacom/omarchy), the same mirrors build/Dockerfile builds against.
 # Printed as pacman Server lines: $repo and $arch stay literal.
 # shellcheck disable=SC2016
 mirror_server() {
-  if [[ $arch == aarch64 ]]; then
-    echo 'https://arm-mirror.omarchy.org/$arch/$repo'
-    return
-  fi
-  case $1 in
-    edge) echo 'https://mirror.omarchy.org/$repo/os/$arch' ;;
-    rc) echo 'https://rc-mirror.omarchy.org/$repo/os/$arch' ;;
-    stable) echo 'https://stable-mirror.omarchy.org/$repo/os/$arch' ;;
-    *) die "no Arch mirror is known for channel $1" ;;
+  case $arch:$1 in
+    x86_64:edge) echo 'https://mirror.omarchy.org/$repo/os/$arch' ;;
+    x86_64:rc) echo 'https://rc-mirror.omarchy.org/$repo/os/$arch' ;;
+    x86_64:stable) echo 'https://stable-mirror.omarchy.org/$repo/os/$arch' ;;
+    aarch64:edge) echo 'https://arm-mirror.omarchy.org/$arch/$repo' ;;
+    aarch64:rc) echo 'https://arm-rc-mirror.omarchy.org/$arch/$repo' ;;
+    aarch64:stable) echo 'https://arm-stable-mirror.omarchy.org/$arch/$repo' ;;
+    *) die "no Arch mirror is known for channel $1 on $arch" ;;
   esac
 }
 # The URL of an Arch repository's directory for a channel.

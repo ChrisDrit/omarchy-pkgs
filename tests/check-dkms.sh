@@ -451,3 +451,21 @@ if ((EUID != 0)); then
   if "$ROOT/bin/check-dkms" run --arch x86_64 --channel edge >/dev/null 2>"$tmp/stderr"; then fail "run must refuse without root"; fi
   grep -q 'as root in a disposable system' "$tmp/stderr" && pass "run refuses to install packages without root" || fail "root: $(cat "$tmp/stderr")"
 fi
+
+# A channel's Arch packages come from that channel's own snapshot on both
+# architectures, the mirrors build/Dockerfile builds against: an rc check on
+# aarch64 that read edge's mirror would test modules rc's machines never get.
+mirrors=$(
+  die() { echo "die: $*"; }
+  eval "$(sed -n '/^mirror_server() {/,/^}/p' "$ROOT/bin/check-dkms")"
+  for arch in x86_64 aarch64; do
+    for channel in edge rc stable; do echo "$arch $channel $(mirror_server "$channel")"; done
+  done
+)
+drifted=""
+while read -r arch channel server; do
+  grep -qF "Server = $server" "$ROOT/build/Dockerfile" || drifted+=" $arch:$channel"
+done <<<"$mirrors"
+[[ $(sort -u -k3 <<<"$mirrors" | wc -l) == 6 && -z $drifted ]] &&
+  pass "each channel reads its own Arch mirror on both architectures, as build/Dockerfile does" ||
+  fail "mirrors drifted from build/Dockerfile:${drifted:- two channels share one} ($mirrors)"
